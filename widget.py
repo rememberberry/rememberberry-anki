@@ -15,8 +15,7 @@ class ConfigWidget(QWidget):
             with open(self.config_filename(), 'r') as f:
                 self.config = json.loads(f.read())
         except:
-            self.config = {'target_deck': None,
-                           'sentence_decks': [],
+            self.config = {'sentence_decks': [],
                            'active_vocabulary_decks': [],
                            'known_vocabulary_decks': []}
 
@@ -157,10 +156,6 @@ class RememberberryWidget(ConfigWidget):
         self.decks_tab.layout.addWidget(l2, 4, 0)
         self.known_vocabulary_deck_choice = DeckMultipleChoice('known_vocabulary_decks')
         self.decks_tab.layout.addWidget(self.known_vocabulary_deck_choice, 5, 0)
-        #l3 = QLabel('Target deck where the sentences will be copied:'); l3.setWordWrap(True)
-        #self.decks_tab.layout.addWidget(l3, 2, 1)
-        #self.target_deck_choice = DeckSingleChoice('target_deck')
-        #self.decks_tab.layout.addWidget(self.target_deck_choice, 3, 1)
 
         self.decks_tab.setLayout(self.decks_tab.layout)
         self.tabs.currentChanged.connect(self.on_tab_changed)
@@ -175,7 +170,6 @@ class RememberberryWidget(ConfigWidget):
         self.sentence_deck_choice.rebuildUI()
         self.active_vocabulary_deck_choice.rebuildUI()
         self.known_vocabulary_deck_choice.rebuildUI()
-        #self.target_deck_choice.rebuildUI()
 
     def create_find_tab(self):
         self.read_config()
