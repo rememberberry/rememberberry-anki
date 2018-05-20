@@ -12,7 +12,7 @@ CJK Compatibility Ideographs Supplement 2F800-2FA1F Unifiable variants
 """
 from aqt.utils import showInfo
 
-def _is_hanzi(char):
+def is_hanzi(char):
     ord('\u4E00')
     ranges = [('\u4E00', '\u9FFF'),
               ('\u3400', '\u4DBF'),
@@ -31,5 +31,11 @@ def _is_hanzi(char):
             raise
     return False
 
+
 def filter_text_hanzi(text):
-    return ''.join(char for char in text if _is_hanzi(char))
+    return ''.join(char for char in text if is_hanzi(char))
+
+
+def split_hanzi(text):
+    text = ''.join(char if is_hanzi(char) else ' ' for char in text)
+    return [s for s in text.split(' ') if len(s) > 0]

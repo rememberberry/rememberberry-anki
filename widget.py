@@ -1,10 +1,12 @@
 import os
 import json
+import random
 from aqt import mw
 from aqt.utils import showInfo
 from aqt.qt import *
 
-from .han import filter_text_hanzi
+from .han import filter_text_hanzi, is_hanzi, split_hanzi
+from collections import defaultdict
 
 class ConfigWidget(QWidget):
     def __init__(self):
@@ -117,20 +119,21 @@ class DeckMultipleChoice(ConfigWidget):
 
 
 class RememberberryWidget(ConfigWidget):
-    def __init__(self):
+    def __init__(self, editor):
         QWidget.__init__(self)
+        self.editor = editor
         self.build()
 
     def build(self):
 
         self.setWindowTitle('Rememberberry')
+        self.resize(1000, 800)
         self.layout = QVBoxLayout(self)
  
         # Initialize tab screen
         self.tabs = QTabWidget()
         self.find_tab = QWidget()	
         self.decks_tab = QWidget()
-        self.tabs.resize(1000, 1200) 
  
         # Add tabs
         self.tabs.addTab(self.find_tab, 'Find')
@@ -171,41 +174,120 @@ class RememberberryWidget(ConfigWidget):
         self.active_vocabulary_deck_choice.rebuildUI()
         self.known_vocabulary_deck_choice.rebuildUI()
 
+    def get_did_from_name(self, deck_name, decks):
+        dids = [deck_id for (deck_id, deck_info) in decks.items()
+               if deck_info['name'] == deck_name]
+        if len(dids) == 0:
+            return None
+        return dids[0]
+
     def create_find_tab(self):
+        self.do_the_thing()
+        self.table_widget = QTableWidget()
+        self.table_widget.setRowCount(10)
+        num_columns = 4
+        self.table_widget.setColumnCount(num_columns)
+        for i in range(num_columns):
+            self.table_widget.setHorizontalHeaderItem(i, QTableWidgetItem("Field %s" % (i+1)));
+            self.table_widget.setColumnWidth(i, 300)
+        self.find_tab.layout = QGridLayout(self)
+        sample = random.sample(self.sentences, 20)
+        for i, (field_idx, fields, strength) in enumerate(sample):
+            button = QPushButton('+', self)
+            colors = []
+            sentence = fields[field_idx]
+            for char, s in zip(sentence, strength):
+                if s < 0:
+                    colors.append('black')
+                elif 0 <= s < 0.2:
+                    colors.append('red')
+                elif 0.2 <= s < 0.4:
+                    colors.append('yellow')
+                elif 0.4 <= s < 0.6:
+                    colors.append('lightgray')
+                elif 0.6 <= s < 0.8:
+                    colors.append('lightgreen')
+                elif 0.8 <= s <= 1:
+                    colors.append('green')
+
+            label = ''.join('<font color="%s">%s</font>' % (color, char)
+                            for color, char in zip(colors, sentence))
+
+            self.table_widget.setCellWidget(i, 0, QLabel(label))
+            for j, k in enumerate([k for k in range(len(fields)) if k != field_idx]):
+                if j+1 >= num_columns:
+                    break
+                self.table_widget.setCellWidget(i, j+1, QLabel(fields[k]))
+        self.find_tab.layout.addWidget(self.table_widget, 0, 0)
+        self.find_tab.setLayout(self.find_tab.layout)
+
+    def do_the_thing(self):
         self.read_config()
         decks = json.loads(mw.col.db.all("select decks from col")[0][0])
-        known = self.config['known_vocabulary_decks']
-        active = self.config['active_vocabulary_decks']
-        user_decks = (list(zip(known, [True]*len(known))) +
-                      list(zip(active, [True]*len(active))))
+        known_decks = self.config['known_vocabulary_decks']
+        active_decks = self.config['active_vocabulary_decks']
+        sentence_decks = self.config['sentence_decks']
+        user_decks = (list(zip(known_decks, [True]*len(known_decks))) +
+                      list(zip(active_decks, [False]*len(active_decks))))
         # Collect all the active and non-active vocab
         # Filter on hanzi unicode to find the right fields
-        vocab = {} # { hanzi: memory strength / None(if "known")
+        vocab_strength = defaultdict(lambda: 0)
 
-        first = True
-        for deck_name, is_known in user_decks:
-            dids = [deck_id for (deck_id, deck_info) in decks.items()
-                   if deck_info['name'] == deck_name]
-            if len(dids) == 0:
-                continue
-            did = dids[0]
-            notes = mw.col.db.all("select nid, reps, lapses from cards where did=%s" % did)
-            note_fields = [mw.col.db.all("select flds from notes where id=%s" % nid)[0][0].split('\x1f')
-                           for nid, _, _ in notes]
-            for note, fields in zip(notes, note_fields):
-                for field in fields:
-                    if first:
-                        #showInfo(field)
-                        first = False
-                    word = filter_text_hanzi(field)
-                    if len(word) == 0:
+        def _iter_note_hanzi(deck_name):
+            did = self.get_did_from_name(deck_name, decks)
+            if did is None:
+                return
+            cards = mw.col.db.all("select id, nid, reps, lapses from cards where did=%s" % did)
+            ids_str = ', '.join(str(nid) for _, nid, *_ in cards)
+            note_fields = mw.col.db.all("select flds from notes where id in (%s)" % ids_str)
+            note_fields = [fields[0].split('\x1f') for fields in note_fields]
+            for card, fields in zip(cards, note_fields):
+                for i, field in enumerate(fields):
+                    if len(filter_text_hanzi(field)) == 0:
                         continue
-                    reps, lapses = note[1:]
-                    vocab[word] = 1.0 if is_known else max((reps-lapses) / 10, 1.0)
+                    yield card, i, fields
 
+        for deck_name, is_known in user_decks:
+            for (*_, reps, lapses), field_idx, fields in _iter_note_hanzi(deck_name):
+                for word in split_hanzi(fields[field_idx]):
+                    strength = max(vocab_strength[word], 1.0 if is_known else
+                                   min((reps-lapses) / 10, 1.0))
 
-
-        #showInfo(str(vocab.items()[:5]))
+                    vocab_strength[word] = strength
+        # Build a map from first character to full words
+        char_to_words = defaultdict(list)
+        for word in vocab_strength.keys():
+            char_to_words[word[0]].append(word)
+        # Sort the word lists so we always check longest word first
+        for key, words in char_to_words.items():
+            char_to_words[key] = sorted(words, key=lambda x: len(x), reverse=True)
 
         # Go through sentence decks, collect statistics
-        sentences = {} # { sentence: score = average memory strength per char }
+        sentences = []
+        for deck_name in sentence_decks:
+            for _, field_idx, fields in _iter_note_hanzi(deck_name):
+                field = fields[field_idx]
+                strength = [0.0 if is_hanzi(char) else -1.0 for char in field]
+                #matches = []
+                next_char = 0
+                while next_char < len(field):
+                    curr_char = field[next_char]
+                    if curr_char not in char_to_words:
+                        next_char += 1
+                        continue
+
+                    for word in char_to_words[curr_char]:
+                        if field[next_char:next_char+len(word)] != word:
+                            continue
+                        for i in range(next_char, next_char+len(word)):
+                            strength[i] = vocab_strength[word]
+                        # -1 because it'll be incremented right after
+                        next_char += len(word) - 1
+                        break
+                    next_char += 1
+                sentences.append((field_idx, fields, strength))
+
+        self.sentences = sentences
+
+    def get_target_deck(self):
+        return self.editor.parentWindow.deckChooser.selectedId()

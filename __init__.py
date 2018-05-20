@@ -8,7 +8,7 @@ from rememberberry.widget import RememberberryWidget
 import aqt.toolbar
 
 def _rememberberryLinkHandler(editor):
-    widget = RememberberryWidget()
+    widget = RememberberryWidget(editor)
     mw.rememberberry = widget
     widget.show()
 
