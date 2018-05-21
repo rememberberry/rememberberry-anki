@@ -149,7 +149,7 @@ class RememberberryWidget(ConfigWidget):
         self.decks_tab.layout.addWidget(QLabel('Decks to draw sentences from:', self), 0, 0)
         self.decks_tab.layout.addWidget(self.sentence_deck_choice, 1, 0)
 
-        l1 = QLabel('Decks where you keep active vocab (and possibly sentences):', self); l1.setWordWrap(True)
+        l1 = QLabel('Decks where you keep active vocab and sentences:', self); l1.setWordWrap(True)
         self.decks_tab.layout.addWidget(l1, 2, 0)
         self.active_vocabulary_deck_choice = DeckMultipleChoice('active_vocabulary_decks')
         self.decks_tab.layout.addWidget(self.active_vocabulary_deck_choice, 3, 0)
@@ -192,13 +192,12 @@ class RememberberryWidget(ConfigWidget):
             self.table_widget.setColumnWidth(i, 300)
         self.find_tab.layout = QGridLayout(self)
         sample = random.sample(self.sentences, 20)
-        for i, (field_idx, fields, strength) in enumerate(sample):
-            button = QPushButton('+', self)
+        for i, (field_idx, fields, strengths) in enumerate(sample):
             colors = []
             sentence = fields[field_idx]
-            for char, s in zip(sentence, strength):
+            for start, end, s in strengths:
                 if s < 0:
-                    colors.append('black')
+                    colors.append('white')
                 elif 0 <= s < 0.2:
                     colors.append('red')
                 elif 0.2 <= s < 0.4:
@@ -210,14 +209,16 @@ class RememberberryWidget(ConfigWidget):
                 elif 0.8 <= s <= 1:
                     colors.append('green')
 
-            label = ''.join('<font color="%s">%s</font>' % (color, char)
-                            for color, char in zip(colors, sentence))
+            label = ''.join('<span style="background: %s; border-color: black">%s</span><span> </span>'
+                            % (color, sentence[start:end])
+                            for color, (start, end, _) in zip(colors, strengths))
 
             self.table_widget.setCellWidget(i, 0, QLabel(label))
             for j, k in enumerate([k for k in range(len(fields)) if k != field_idx]):
                 if j+1 >= num_columns:
                     break
                 self.table_widget.setCellWidget(i, j+1, QLabel(fields[k]))
+
         self.find_tab.layout.addWidget(self.table_widget, 0, 0)
         self.find_tab.setLayout(self.find_tab.layout)
 
@@ -254,6 +255,7 @@ class RememberberryWidget(ConfigWidget):
                                    min((reps-lapses) / 10, 1.0))
 
                     vocab_strength[word] = strength
+
         # Build a map from first character to full words
         char_to_words = defaultdict(list)
         for word in vocab_strength.keys():
@@ -267,25 +269,31 @@ class RememberberryWidget(ConfigWidget):
         for deck_name in sentence_decks:
             for _, field_idx, fields in _iter_note_hanzi(deck_name):
                 field = fields[field_idx]
-                strength = [0.0 if is_hanzi(char) else -1.0 for char in field]
-                #matches = []
-                next_char = 0
-                while next_char < len(field):
-                    curr_char = field[next_char]
+                strengths = []
+                words = []
+                curr_idx = 0
+                non_hanzi_start = -1
+                while curr_idx < len(field):
+                    curr_char = field[curr_idx]
                     if curr_char not in char_to_words:
-                        next_char += 1
+                        if non_hanzi_start < 0:
+                            non_hanzi_start = curr_idx
+                        curr_idx += 1
                         continue
 
+                    if non_hanzi_start >= 0:
+                        strengths.append((non_hanzi_start, curr_idx, -1.0))
+                        non_hanzi_start = -1
+
                     for word in char_to_words[curr_char]:
-                        if field[next_char:next_char+len(word)] != word:
+                        if field[curr_idx:curr_idx+len(word)] != word:
                             continue
-                        for i in range(next_char, next_char+len(word)):
-                            strength[i] = vocab_strength[word]
+                        strengths.append((curr_idx, curr_idx+len(word), vocab_strength[word]))
                         # -1 because it'll be incremented right after
-                        next_char += len(word) - 1
+                        curr_idx += len(word) - 1
                         break
-                    next_char += 1
-                sentences.append((field_idx, fields, strength))
+                    curr_idx += 1
+                sentences.append((field_idx, fields, strengths))
 
         self.sentences = sentences
 
