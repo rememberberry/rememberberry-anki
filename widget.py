@@ -1,9 +1,12 @@
 import os
 import json
 import random
+from functools import partial
 from aqt import mw
 from aqt.utils import showInfo
 from aqt.qt import *
+from anki.utils import ids2str, fieldChecksum, stripHTML, \
+    intTime, splitFields, joinFields, maxID, json, devMode
 
 from .han import filter_text_hanzi, is_hanzi, split_hanzi
 from collections import defaultdict
@@ -28,7 +31,7 @@ class ConfigWidget(QWidget):
             os.makedirs(user_files)
         except:
             pass
-        return os.path.join(user_files, 'config.json')
+        return os.path.join(user_files, '%s_config.json' % mw.pm.name)
 
     def write_config(self):
         with open(self.config_filename(), 'w') as f:
@@ -121,11 +124,22 @@ class DeckMultipleChoice(ConfigWidget):
 class RememberberryWidget(ConfigWidget):
     def __init__(self, editor):
         QWidget.__init__(self)
+        self.max_num_results = 50
+        self.min_difficulty = 0
+        self.max_difficulty = 30
+        self.curr_difficulty = 10
+        self.num_columns = 4
         self.editor = editor
+
+        def _close(orig_self, orig_close):
+            self.close()
+            orig_close(orig_self)
+
+        editor.parentWindow.closeEvent = partial(_close, orig_close=editor.parentWindow.closeEvent)
+        editor.mw.closeEvent = partial(_close, orig_close=editor.mw.closeEvent)
         self.build()
 
     def build(self):
-
         self.setWindowTitle('Rememberberry')
         self.resize(1000, 800)
         self.layout = QVBoxLayout(self)
@@ -182,17 +196,104 @@ class RememberberryWidget(ConfigWidget):
         return dids[0]
 
     def create_find_tab(self):
-        self.do_the_thing()
+        self.search_button = QPushButton('Search')
+        self.search_button.clicked.connect(self.search)
+
+        self.difficulty_slider = QSlider(Qt.Horizontal)
+        self.difficulty_slider.setFocusPolicy(Qt.StrongFocus)
+        self.difficulty_slider.setTickPosition(QSlider.TicksBothSides)
+        self.difficulty_slider.setTickInterval(1)
+        self.difficulty_slider.setMinimum(self.min_difficulty)
+        self.difficulty_slider.setMaximum(self.max_difficulty)
+        self.difficulty_slider.setValue(self.curr_difficulty)
+        self.difficulty_slider.setSingleStep(1)
+        self.difficulty_slider.valueChanged.connect(self.difficulty_changed)
+
+        self.filter_box = QLineEdit(self)
+        self.filter_box.returnPressed.connect(self.search)
+
+        self.find_tab.layout = QVBoxLayout(self)
+        self.find_tab.setLayout(self.find_tab.layout)
+        group = QGroupBox()
+        group.layout = QGridLayout()
+        group.setLayout(group.layout)
+        group.layout.addWidget(self.difficulty_slider, 0, 0)
+        group.layout.addWidget(self.filter_box, 0, 1)
+        self.find_tab.layout.addWidget(group, 0)
+        self.find_tab.layout.addWidget(self.search_button, 1)
         self.table_widget = QTableWidget()
-        self.table_widget.setRowCount(10)
-        num_columns = 4
-        self.table_widget.setColumnCount(num_columns)
-        for i in range(num_columns):
-            self.table_widget.setHorizontalHeaderItem(i, QTableWidgetItem("Field %s" % (i+1)));
+        self.table_widget.setColumnCount(self.num_columns)
+        self.table_widget.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
+        self.table_widget.setSelectionBehavior(QAbstractItemView.SelectRows)
+
+        self.table_widget.hide()
+        self.find_tab.layout.addWidget(self.table_widget, 2)
+
+        button_group = QGroupBox()
+        button_group.layout = QGridLayout()
+        button_group.setLayout(button_group.layout)
+        add_button = QPushButton('Add Cards')
+        add_button.clicked.connect(self.add)
+        add_cloze_button = QPushButton('Add as Cloze')
+        add_cloze_button.clicked.connect(self.add_cloze)
+        close_button = QPushButton('Close')
+        close_button.clicked.connect(self.close)
+        button_group.layout.addWidget(add_button, 0, 0)
+        button_group.layout.addWidget(add_cloze_button, 0, 1)
+        button_group.layout.addWidget(close_button, 0, 2)
+        button_group.setFixedHeight(50)
+        button_group.setFixedWidth(400)
+        add_button.setFixedWidth(110)
+        add_cloze_button.setFixedWidth(110)
+        close_button.setFixedWidth(110)
+        self.find_tab.layout.addStretch()
+        self.find_tab.layout.addWidget(button_group, 3)
+
+        self.search_button.setFixedWidth(110)
+        self.difficulty_slider.setFixedWidth(300)
+        self.filter_box.setFixedWidth(300)
+
+    def add(self):
+        target_did = self.editor.parentWindow.deckChooser.selectedId()
+        note_ids = []
+        for row in self.table_widget.selectionModel().selectedRows():
+            (_, nid, *_), *_ = self.search_results[row.row()]
+            notes = mw.col.db.all('select * from notes where id = %i' % nid)
+            note_ids.append(nid)
+
+        note_ids_str = ', '.join([str(n) for n in note_ids])
+        cards = mw.col.db.all('select * from cards where nid in (%s)' % note_ids_str)
+        for card in cards:
+            # Create a new card id
+            new_card = (maxID(mw.col.db), card[1], target_did, *card[3:])
+
+            templ_str = ','.join(['?']*len(new_card))
+            insert_query = 'insert into cards values (%s)' % templ_str
+            mw.col.db.execute(insert_query, *new_card)
+
+        showInfo('Added %i cards from %s notes' % (len(cards), len(note_ids)))
+
+    def add_cloze(self):
+        pass
+
+    def difficulty_changed(self):
+        self.curr_difficulty = self.difficulty_slider.value()
+
+    def search(self):
+        filter_text = self.filter_box.text()
+        self.table_widget.clear()
+        self.do_the_thing(None if filter_text == '' else filter_text)
+        for i in range(self.num_columns):
+            self.table_widget.setHorizontalHeaderItem(i, QTableWidgetItem('Field %s' % (i+1)));
             self.table_widget.setColumnWidth(i, 300)
-        self.find_tab.layout = QGridLayout(self)
-        sample = random.sample(self.sentences, 20)
-        for i, (field_idx, fields, strengths) in enumerate(sample):
+
+        sentences = sorted([s for s in self.sentences if self.curr_difficulty < s[-1] < self.max_difficulty],
+                           key=lambda x: x[-1])
+        self.search_results = sentences[:self.max_num_results]
+        self.table_widget.setRowCount(len(self.search_results))
+
+        for i, (card, field_idx, fields, strengths, difficulty) in enumerate(self.search_results):
+            _, nid, *_ = card
             colors = []
             sentence = fields[field_idx]
             for start, end, s in strengths:
@@ -215,14 +316,15 @@ class RememberberryWidget(ConfigWidget):
 
             self.table_widget.setCellWidget(i, 0, QLabel(label))
             for j, k in enumerate([k for k in range(len(fields)) if k != field_idx]):
-                if j+1 >= num_columns:
-                    break
                 self.table_widget.setCellWidget(i, j+1, QLabel(fields[k]))
+                if j >= self.num_columns-1:
+                    break
+            self.table_widget.setCellWidget(i, self.num_columns-1, QLabel(str(nid)))
+        self.table_widget.resizeRowsToContents()
+        self.table_widget.resizeColumnsToContents()
+        self.table_widget.show()
 
-        self.find_tab.layout.addWidget(self.table_widget, 0, 0)
-        self.find_tab.setLayout(self.find_tab.layout)
-
-    def do_the_thing(self):
+    def do_the_thing(self, filter_text=None):
         self.read_config()
         decks = json.loads(mw.col.db.all("select decks from col")[0][0])
         known_decks = self.config['known_vocabulary_decks']
@@ -240,9 +342,11 @@ class RememberberryWidget(ConfigWidget):
                 return
             cards = mw.col.db.all("select id, nid, reps, lapses from cards where did=%s" % did)
             ids_str = ', '.join(str(nid) for _, nid, *_ in cards)
-            note_fields = mw.col.db.all("select flds from notes where id in (%s)" % ids_str)
-            note_fields = [fields[0].split('\x1f') for fields in note_fields]
-            for card, fields in zip(cards, note_fields):
+            note_fields = mw.col.db.all("select id, flds from notes where id in (%s)" % ids_str)
+            note_fields = {nid: fields.split('\x1f') for nid, fields in note_fields}
+            for card in cards:
+                _, nid, *_ = card
+                fields = note_fields[nid]
                 for i, field in enumerate(fields):
                     if len(filter_text_hanzi(field)) == 0:
                         continue
@@ -267,8 +371,10 @@ class RememberberryWidget(ConfigWidget):
         # Go through sentence decks, collect statistics
         sentences = []
         for deck_name in sentence_decks:
-            for _, field_idx, fields in _iter_note_hanzi(deck_name):
+            for card, field_idx, fields in _iter_note_hanzi(deck_name):
                 field = fields[field_idx]
+                if filter_text is not None and filter_text not in field:
+                    continue
                 strengths = []
                 words = []
                 curr_idx = 0
@@ -293,7 +399,8 @@ class RememberberryWidget(ConfigWidget):
                         curr_idx += len(word) - 1
                         break
                     curr_idx += 1
-                sentences.append((field_idx, fields, strengths))
+                difficulty = sum(10*(1-s[-1]) for s in strengths if s[-1] >= 0)
+                sentences.append((card, field_idx, fields, strengths, difficulty))
 
         self.sentences = sentences
 
