@@ -20,9 +20,11 @@ class ConfigWidget(QWidget):
             with open(self.config_filename(), 'r') as f:
                 self.config = json.loads(f.read())
         except:
-            self.config = {'sentence_decks': [],
+            self.config = {'version': 1,
+                           'sentence_decks': [],
                            'active_vocabulary_decks': [],
-                           'known_vocabulary_decks': []}
+                           'known_vocabulary_decks': [], 
+                           'added': []}
 
     @classmethod
     def config_filename(cls):
@@ -124,7 +126,7 @@ class DeckMultipleChoice(ConfigWidget):
 class RememberberryWidget(ConfigWidget):
     def __init__(self, editor):
         QWidget.__init__(self)
-        self.max_num_results = 50
+        self.max_num_results = 500
         self.min_difficulty = 0
         self.max_difficulty = 30
         self.curr_difficulty = 10
@@ -319,7 +321,7 @@ class RememberberryWidget(ConfigWidget):
                 self.table_widget.setCellWidget(i, j+1, QLabel(fields[k]))
                 if j >= self.num_columns-1:
                     break
-            self.table_widget.setCellWidget(i, self.num_columns-1, QLabel(str(nid)))
+            self.table_widget.setCellWidget(i, self.num_columns-1, QLabel(str(difficulty)))
         self.table_widget.resizeRowsToContents()
         self.table_widget.resizeColumnsToContents()
         self.table_widget.show()
@@ -332,37 +334,38 @@ class RememberberryWidget(ConfigWidget):
         sentence_decks = self.config['sentence_decks']
         user_decks = (list(zip(known_decks, [True]*len(known_decks))) +
                       list(zip(active_decks, [False]*len(active_decks))))
-        # Collect all the active and non-active vocab
-        # Filter on hanzi unicode to find the right fields
-        vocab_strength = defaultdict(lambda: 0)
+        vocab_strengths = defaultdict(list)
 
         def _iter_note_hanzi(deck_name):
             did = self.get_did_from_name(deck_name, decks)
             if did is None:
                 return
             cards = mw.col.db.all("select id, nid, reps, lapses from cards where did=%s" % did)
+            #cards = mw.col.db.all("select nid, max(reps-lapses) from cards where did=%s group by nid" % did)
             ids_str = ', '.join(str(nid) for _, nid, *_ in cards)
             note_fields = mw.col.db.all("select id, flds from notes where id in (%s)" % ids_str)
             note_fields = {nid: fields.split('\x1f') for nid, fields in note_fields}
+            emitted_notes = set()
             for card in cards:
                 _, nid, *_ = card
+                if nid in emitted_notes:
+                    continue
                 fields = note_fields[nid]
                 for i, field in enumerate(fields):
                     if len(filter_text_hanzi(field)) == 0:
                         continue
+                    emitted_notes.add(nid)
                     yield card, i, fields
 
         for deck_name, is_known in user_decks:
             for (*_, reps, lapses), field_idx, fields in _iter_note_hanzi(deck_name):
                 for word in split_hanzi(fields[field_idx]):
-                    strength = max(vocab_strength[word], 1.0 if is_known else
-                                   min((reps-lapses) / 10, 1.0))
-
-                    vocab_strength[word] = strength
+                    vocab_strengths[word].append(1.0 if is_known else
+                                                 min((reps-lapses) / 10, 1.0))
 
         # Build a map from first character to full words
         char_to_words = defaultdict(list)
-        for word in vocab_strength.keys():
+        for word in vocab_strengths.keys():
             char_to_words[word[0]].append(word)
         # Sort the word lists so we always check longest word first
         for key, words in char_to_words.items():
@@ -394,7 +397,8 @@ class RememberberryWidget(ConfigWidget):
                     for word in char_to_words[curr_char]:
                         if field[curr_idx:curr_idx+len(word)] != word:
                             continue
-                        strengths.append((curr_idx, curr_idx+len(word), vocab_strength[word]))
+                        strength = min(1.0, sum(vocab_strengths[word]))
+                        strengths.append((curr_idx, curr_idx+len(word), strength))
                         # -1 because it'll be incremented right after
                         curr_idx += len(word) - 1
                         break

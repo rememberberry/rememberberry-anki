@@ -12,6 +12,11 @@ CJK Compatibility Ideographs Supplement 2F800-2FA1F Unifiable variants
 """
 from aqt.utils import showInfo
 
+import logging
+from . import jieba
+#jieba.dt.tmp_dir = None
+#jieba.dt.cache_file = None
+jieba.setLogLevel(logging.CRITICAL)
 
 def is_hanzi(char):
     ord('\u4E00')
@@ -37,6 +42,11 @@ def filter_text_hanzi(text):
     return ''.join(char for char in text if is_hanzi(char))
 
 
+def has_hanzi(text):
+    for c in text:
+        if is_hanzi(c):
+            return True
+    return False
+
 def split_hanzi(text):
-    text = ''.join(char if is_hanzi(char) else ' ' for char in text)
-    return [s for s in text.split(' ') if len(s) > 0]
+    return [w for w in jieba.cut(text, cut_all=True) if has_hanzi(w)]
