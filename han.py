@@ -10,12 +10,17 @@ CJK Unified Ideographs Extension E      2B820–2CEAF Rare, historic
 CJK Compatibility Ideographs            F900-FAFF   Duplicates, unifiable variants, corporate characters
 CJK Compatibility Ideographs Supplement 2F800-2FA1F Unifiable variants
 """
+import os
+import sys
+import logging
+
 from aqt.utils import showInfo
 
-import logging
-from . import jieba
-#jieba.dt.tmp_dir = None
-#jieba.dt.cache_file = None
+sys.path.append(os.path.join(os.path.dirname(__file__), 'jieba'))
+import jieba
+
+jieba.dt.tmp_dir = None
+jieba.dt.cache_file = None
 jieba.setLogLevel(logging.CRITICAL)
 
 def is_hanzi(char):
