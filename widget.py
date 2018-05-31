@@ -294,8 +294,7 @@ class RememberberryWidget(ConfigWidget):
         self.search_results = sentences[:self.max_num_results]
         self.table_widget.setRowCount(len(self.search_results))
 
-        for i, (card, field_idx, fields, strengths, difficulty) in enumerate(self.search_results):
-            _, nid, *_ = card
+        for i, (nid, field_idx, fields, strengths, difficulty) in enumerate(self.search_results):
             colors = []
             sentence = fields[field_idx]
             for start, end, s in strengths:
@@ -340,28 +339,22 @@ class RememberberryWidget(ConfigWidget):
             did = self.get_did_from_name(deck_name, decks)
             if did is None:
                 return
-            cards = mw.col.db.all("select id, nid, reps, lapses from cards where did=%s" % did)
-            #cards = mw.col.db.all("select nid, max(reps-lapses) from cards where did=%s group by nid" % did)
-            ids_str = ', '.join(str(nid) for _, nid, *_ in cards)
+            cards = mw.col.db.all("select nid, max(reps-lapses) from cards where did=%s group by nid" % did)
+            ids_str = ', '.join(str(nid) for nid, _ in cards)
             note_fields = mw.col.db.all("select id, flds from notes where id in (%s)" % ids_str)
             note_fields = {nid: fields.split('\x1f') for nid, fields in note_fields}
-            emitted_notes = set()
-            for card in cards:
-                _, nid, *_ = card
-                if nid in emitted_notes:
-                    continue
+            for nid, reps_min_lapses in cards:
                 fields = note_fields[nid]
                 for i, field in enumerate(fields):
                     if len(filter_text_hanzi(field)) == 0:
                         continue
-                    emitted_notes.add(nid)
-                    yield card, i, fields
+                    yield nid, reps_min_lapses, i, fields
 
         for deck_name, is_known in user_decks:
-            for (*_, reps, lapses), field_idx, fields in _iter_note_hanzi(deck_name):
+            for nid, reps_min_lapses, field_idx, fields in _iter_note_hanzi(deck_name):
                 for word in split_hanzi(fields[field_idx]):
                     vocab_strengths[word].append(1.0 if is_known else
-                                                 min((reps-lapses) / 10, 1.0))
+                                                 min((reps_min_lapses) / 10, 1.0))
 
         # Build a map from first character to full words
         char_to_words = defaultdict(list)
@@ -374,7 +367,7 @@ class RememberberryWidget(ConfigWidget):
         # Go through sentence decks, collect statistics
         sentences = []
         for deck_name in sentence_decks:
-            for card, field_idx, fields in _iter_note_hanzi(deck_name):
+            for nid, reps_min_lapses, field_idx, fields in _iter_note_hanzi(deck_name):
                 field = fields[field_idx]
                 if filter_text is not None and filter_text not in field:
                     continue
@@ -404,7 +397,7 @@ class RememberberryWidget(ConfigWidget):
                         break
                     curr_idx += 1
                 difficulty = sum(10*(1-s[-1]) for s in strengths if s[-1] >= 0)
-                sentences.append((card, field_idx, fields, strengths, difficulty))
+                sentences.append((nid, field_idx, fields, strengths, difficulty))
 
         self.sentences = sentences
 
