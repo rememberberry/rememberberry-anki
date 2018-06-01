@@ -132,6 +132,7 @@ class RememberberryWidget(ConfigWidget):
         self.curr_difficulty = 10
         self.num_columns = 4
         self.editor = editor
+        self.redo_search = True
 
         def _close(orig_self, orig_close):
             self.close()
@@ -259,7 +260,7 @@ class RememberberryWidget(ConfigWidget):
         target_did = self.editor.parentWindow.deckChooser.selectedId()
         note_ids = []
         for row in self.table_widget.selectionModel().selectedRows():
-            (_, nid, *_), *_ = self.search_results[row.row()]
+            nid, *_ = self.search_results[row.row()]
             notes = mw.col.db.all('select * from notes where id = %i' % nid)
             note_ids.append(nid)
 
@@ -276,20 +277,34 @@ class RememberberryWidget(ConfigWidget):
         showInfo('Added %i cards from %s notes' % (len(cards), len(note_ids)))
 
     def add_cloze(self):
-        pass
+        target_did = self.editor.parentWindow.deckChooser.selectedId()
+        for row in self.table_widget.selectionModel().selectedRows():
+            nid, *_ = self.search_results[row.row()]
+            cloze = mw.col.models.byName("Cloze")
+            mw.col.models.setCurrent(cloze)
+            f = mw.col.newNote()
+            f['Text'] = '{{c1::one}}'
+            mw.col.addNote(f)
+            cloze['did'] = target_did
+            mw.col.models.save(cloze)
 
     def difficulty_changed(self):
         self.curr_difficulty = self.difficulty_slider.value()
 
     def search(self):
         filter_text = self.filter_box.text()
+
         self.table_widget.clear()
-        self.do_the_thing(None if filter_text == '' else filter_text)
+        if self.redo_search:
+            self.prepare_search()
+            self.redo_search = False
+
         for i in range(self.num_columns):
             self.table_widget.setHorizontalHeaderItem(i, QTableWidgetItem('Field %s' % (i+1)));
             self.table_widget.setColumnWidth(i, 300)
 
-        sentences = sorted([s for s in self.sentences if self.curr_difficulty < s[-1] < self.max_difficulty],
+        sentence_filter = lambda s: self.curr_difficulty < s[-1] < self.max_difficulty and filter_text in s[2][s[1]]
+        sentences = sorted([s for s in self.sentences if sentence_filter(s)],
                            key=lambda x: x[-1])
         self.search_results = sentences[:self.max_num_results]
         self.table_widget.setRowCount(len(self.search_results))
@@ -325,7 +340,7 @@ class RememberberryWidget(ConfigWidget):
         self.table_widget.resizeColumnsToContents()
         self.table_widget.show()
 
-    def do_the_thing(self, filter_text=None):
+    def prepare_search(self):
         self.read_config()
         decks = json.loads(mw.col.db.all("select decks from col")[0][0])
         known_decks = self.config['known_vocabulary_decks']
@@ -369,8 +384,6 @@ class RememberberryWidget(ConfigWidget):
         for deck_name in sentence_decks:
             for nid, reps_min_lapses, field_idx, fields in _iter_note_hanzi(deck_name):
                 field = fields[field_idx]
-                if filter_text is not None and filter_text not in field:
-                    continue
                 strengths = []
                 words = []
                 curr_idx = 0
