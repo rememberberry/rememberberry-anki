@@ -220,8 +220,10 @@ class RememberberryWidget(ConfigWidget):
         group = QGroupBox()
         group.layout = QGridLayout()
         group.setLayout(group.layout)
-        group.layout.addWidget(self.difficulty_slider, 0, 0)
-        group.layout.addWidget(self.filter_box, 0, 1)
+        group.layout.addWidget(QLabel('Difficulty'), 0, 0)
+        group.layout.addWidget(QLabel('Filter'), 0, 1)
+        group.layout.addWidget(self.difficulty_slider, 1, 0)
+        group.layout.addWidget(self.filter_box, 1, 1)
         self.find_tab.layout.addWidget(group, 0)
         self.find_tab.layout.addWidget(self.search_button, 1)
         self.table_widget = QTableWidget()
@@ -276,17 +278,59 @@ class RememberberryWidget(ConfigWidget):
 
         showInfo('Added %i cards from %s notes' % (len(cards), len(note_ids)))
 
+    def get_translations(self, info):
+        valid_field_names = ['English', 'english', 'en', 'En', 'eng']
+        info = sorted(info, key=lambda x: len(x[1]))
+        min_length = len(info[0][1])
+        for nid, sentence in info:
+            if len(sentence) > min_length:
+                continue
+            mid, flds = mw.col.db.all('select mid, flds from notes where id = %s' % nid)[0]
+            flds = flds.split('\x1f')
+            model = mw.col.models.get(mid)
+            field_names = [field['name'] for field in model['flds']]
+
+            for field_name in valid_field_names:
+                if field_name in field_names:
+                    yield flds[field_names.index(field_name)]
+                    break
+
     def add_cloze(self):
         target_did = self.editor.parentWindow.deckChooser.selectedId()
+        added = 0
         for row in self.table_widget.selectionModel().selectedRows():
-            nid, *_ = self.search_results[row.row()]
-            cloze = mw.col.models.byName("Cloze")
-            mw.col.models.setCurrent(cloze)
+            _, field_idx, fields, words, _ = self.search_results[row.row()]
+            field = fields[field_idx]
+
+            # Sort by start index
+            words = sorted(words, key=lambda w: w[1])
+
+            curr_idx = 0
+            cloze = ''
+            cloze_words = ''
+            next_close_idx = 1
+            for info, start, end, strength in words:
+                if strength == 1.0 or strength < 0:
+                    cloze += field[start:end]
+                elif start > curr_idx:
+                    cloze += field[curr_idx:start]
+                else:
+                    translations = self.get_translations(info)
+                    cloze += '{{c%i::%s::%s}}' % (next_close_idx, field[start:end], '|'.join(translations))
+                    next_close_idx += 1
+                curr_idx = end
+            if curr_idx < len(field):
+                cloze += field[curr_idx:]
+
+            cloze_model = mw.col.models.byName("Cloze")
+            mw.col.models.setCurrent(cloze_model)
             f = mw.col.newNote()
-            f['Text'] = '{{c1::one}}'
+            f['Text'] = cloze
             mw.col.addNote(f)
-            cloze['did'] = target_did
-            mw.col.models.save(cloze)
+            cloze_model['did'] = target_did
+            mw.col.models.save(cloze_model)
+            added += 1
+        showInfo('Added %i cloze cards' % added)
 
     def difficulty_changed(self):
         self.curr_difficulty = self.difficulty_slider.value()
@@ -309,26 +353,26 @@ class RememberberryWidget(ConfigWidget):
         self.search_results = sentences[:self.max_num_results]
         self.table_widget.setRowCount(len(self.search_results))
 
-        for i, (nid, field_idx, fields, strengths, difficulty) in enumerate(self.search_results):
+        for i, (nid, field_idx, fields, words, difficulty) in enumerate(self.search_results):
             colors = []
             sentence = fields[field_idx]
-            for start, end, s in strengths:
-                if s < 0:
+            for _, start, end, strength in words:
+                if strength < 0:
                     colors.append('white')
-                elif 0 <= s < 0.2:
-                    colors.append('red')
-                elif 0.2 <= s < 0.4:
-                    colors.append('yellow')
-                elif 0.4 <= s < 0.6:
-                    colors.append('lightgray')
-                elif 0.6 <= s < 0.8:
-                    colors.append('lightgreen')
-                elif 0.8 <= s <= 1:
-                    colors.append('green')
+                elif 0 <= strength < 0.2:
+                    colors.append('rgb(239, 75, 67)') # red
+                elif 0.2 <= strength < 0.4:
+                    colors.append('rgb(255, 255, 112)') # yellow
+                elif 0.4 <= strength < 0.6:
+                    colors.append('rgb(229, 229, 229)') # gray
+                elif 0.6 <= strength < 0.8:
+                    colors.append('rgb(165, 224, 172)') # light green
+                elif 0.8 <= strength <= 1:
+                    colors.append('rgb(74, 155, 62)') # green
 
             label = ''.join('<span style="background: %s; border-color: black">%s</span><span> </span>'
                             % (color, sentence[start:end])
-                            for color, (start, end, _) in zip(colors, strengths))
+                            for color, (_, start, end, _) in zip(colors, words))
 
             self.table_widget.setCellWidget(i, 0, QLabel(label))
             for j, k in enumerate([k for k in range(len(fields)) if k != field_idx]):
@@ -349,6 +393,7 @@ class RememberberryWidget(ConfigWidget):
         user_decks = (list(zip(known_decks, [True]*len(known_decks))) +
                       list(zip(active_decks, [False]*len(active_decks))))
         vocab_strengths = defaultdict(list)
+        vocab_info = defaultdict(list)
 
         def _iter_note_hanzi(deck_name):
             did = self.get_did_from_name(deck_name, decks)
@@ -370,6 +415,7 @@ class RememberberryWidget(ConfigWidget):
                 for word in split_hanzi(fields[field_idx]):
                     vocab_strengths[word].append(1.0 if is_known else
                                                  min((reps_min_lapses) / 10, 1.0))
+                    vocab_info[word].append((nid, fields[field_idx]))
 
         # Build a map from first character to full words
         char_to_words = defaultdict(list)
@@ -384,7 +430,6 @@ class RememberberryWidget(ConfigWidget):
         for deck_name in sentence_decks:
             for nid, reps_min_lapses, field_idx, fields in _iter_note_hanzi(deck_name):
                 field = fields[field_idx]
-                strengths = []
                 words = []
                 curr_idx = 0
                 non_hanzi_start = -1
@@ -397,20 +442,20 @@ class RememberberryWidget(ConfigWidget):
                         continue
 
                     if non_hanzi_start >= 0:
-                        strengths.append((non_hanzi_start, curr_idx, -1.0))
+                        words.append(([], non_hanzi_start, curr_idx, -1.0))
                         non_hanzi_start = -1
 
                     for word in char_to_words[curr_char]:
                         if field[curr_idx:curr_idx+len(word)] != word:
                             continue
                         strength = min(1.0, sum(vocab_strengths[word]))
-                        strengths.append((curr_idx, curr_idx+len(word), strength))
+                        words.append((vocab_info[word], curr_idx, curr_idx+len(word), strength))
                         # -1 because it'll be incremented right after
                         curr_idx += len(word) - 1
                         break
                     curr_idx += 1
-                difficulty = sum(10*(1-s[-1]) for s in strengths if s[-1] >= 0)
-                sentences.append((nid, field_idx, fields, strengths, difficulty))
+                difficulty = sum(10*(1-w[-1]) for w in words if w[-1] >= 0)
+                sentences.append((nid, field_idx, fields, words, difficulty))
 
         self.sentences = sentences
 
