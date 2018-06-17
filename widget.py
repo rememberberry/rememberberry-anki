@@ -338,19 +338,25 @@ class RememberberryWidget(ConfigWidget):
     def search(self):
         filter_text = self.filter_box.text()
 
-        self.table_widget.clear()
         if self.redo_search:
             self.prepare_search()
             self.redo_search = False
-
-        for i in range(self.num_columns):
-            self.table_widget.setHorizontalHeaderItem(i, QTableWidgetItem('Field %s' % (i+1)));
-            self.table_widget.setColumnWidth(i, 300)
 
         sentence_filter = lambda s: self.curr_difficulty < s[-1] < self.max_difficulty and filter_text in s[2][s[1]]
         sentences = sorted([s for s in self.sentences if sentence_filter(s)],
                            key=lambda x: x[-1])
         self.search_results = sentences[:self.max_num_results]
+
+        if len(self.search_results) == 0:
+            showInfo('No matches')
+            self.filter_box.clear()
+            return
+
+        self.table_widget.clear()
+        for i in range(self.num_columns):
+            self.table_widget.setHorizontalHeaderItem(i, QTableWidgetItem('Field %s' % (i+1)));
+            self.table_widget.setColumnWidth(i, 300)
+
         self.table_widget.setRowCount(len(self.search_results))
 
         for i, (nid, field_idx, fields, words, difficulty) in enumerate(self.search_results):
