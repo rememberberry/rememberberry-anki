@@ -214,6 +214,7 @@ class RememberberryWidget(ConfigWidget):
 
         self.filter_box = QLineEdit(self)
         self.filter_box.returnPressed.connect(self.search)
+        self.filter_box.setPlaceholderText('汉子')
 
         self.find_tab.layout = QVBoxLayout(self)
         self.find_tab.setLayout(self.find_tab.layout)
@@ -295,7 +296,69 @@ class RememberberryWidget(ConfigWidget):
                     yield flds[field_names.index(field_name)]
                     break
 
+    def select_cloze_words_dialog(self, words, fields, field_idx):
+        dialog = QDialog()
+        dialog.layout = QVBoxLayout(self)
+
+        note = QLabel('Note:\n' + '\n'.join(fields))
+        dialog.layout.addWidget(note, 0)
+
+        model = QStandardItemModel()
+        items = []
+        word_indices = []
+        for i, (info, start, end, strength) in enumerate(words):
+            if strength < 0:
+                continue
+            item = QStandardItem(fields[field_idx][start:end])
+            item.setCheckState(Qt.Checked if 0 <= strength < 1 else Qt.Unchecked)
+            item.setCheckable(True)
+            model.appendRow(item)
+            items.append(item)
+            word_indices.append(i)
+        view = QListView()
+        view.setModel(model)
+        dialog.layout.addWidget(view, 1)
+
+        cancelled = True
+        is_joint = False
+        def _add(joint):
+            nonlocal cancelled
+            nonlocal is_joint
+            is_joint = joint
+            cancelled = False
+            dialog.close()
+
+        add_individual_button = QPushButton("Add Separate Clozes")
+        dialog.layout.addWidget(add_individual_button, 2)
+        add_individual_button.clicked.connect(partial(_add, False))
+
+        add_individual_button = QPushButton("Add Joint Cloze")
+        dialog.layout.addWidget(add_individual_button, 3)
+        add_individual_button.clicked.connect(partial(_add, True))
+
+        cancel_button = QPushButton("Cancel")
+        dialog.layout.addWidget(cancel_button, 4)
+        cancel_button.clicked.connect(lambda: dialog.close())
+        dialog.setWindowTitle("Cloze Words")
+        dialog.setWindowModality(Qt.ApplicationModal)
+        dialog.setLayout(dialog.layout)
+        dialog.exec_()
+
+        if cancelled:
+            return None, False
+
+        selected = []
+        for item, i in zip(items, word_indices):
+            if item.checkState() == Qt.Checked:
+                selected.append(i)
+        return selected, is_joint
+
+
     def add_cloze(self):
+        if len(self.table_widget.selectionModel().selectedRows()) == 0:
+            showInfo("No sentences selected")
+            return
+
         target_did = self.editor.parentWindow.deckChooser.selectedId()
         added = 0
         for row in self.table_widget.selectionModel().selectedRows():
@@ -304,33 +367,40 @@ class RememberberryWidget(ConfigWidget):
 
             # Sort by start index
             words = sorted(words, key=lambda w: w[1])
+            selected_words, joint = self.select_cloze_words_dialog(words, fields, field_idx)
+            if selected_words is None:
+                continue
 
             curr_idx = 0
             cloze = ''
             cloze_words = ''
             next_close_idx = 1
-            for info, start, end, strength in words:
-                if strength == 1.0 or strength < 0:
+            for i, (info, start, end, strength) in enumerate(words):
+                if i not in selected_words:
                     cloze += field[start:end]
                 elif start > curr_idx:
                     cloze += field[curr_idx:start]
                 else:
                     translations = self.get_translations(info)
                     cloze += '{{c%i::%s::%s}}' % (next_close_idx, field[start:end], '|'.join(translations))
-                    next_close_idx += 1
+                    if not joint:
+                        next_close_idx += 1
                 curr_idx = end
             if curr_idx < len(field):
                 cloze += field[curr_idx:]
 
-            cloze_model = mw.col.models.byName("Cloze")
+            cloze_model = mw.col.models.byName("Cloze hint")
             mw.col.models.setCurrent(cloze_model)
             f = mw.col.newNote()
             f['Text'] = cloze
+            f['Extra'] = '<br/>'.join([f for i, f in enumerate(fields) if i != field_idx])
             mw.col.addNote(f)
             cloze_model['did'] = target_did
             mw.col.models.save(cloze_model)
-            added += 1
-        showInfo('Added %i cloze cards' % added)
+            added += 1 if joint else next_close_idx - 1
+
+        if added > 0:
+            showInfo('Added %i card%s' % (added, 's' if added > 1 else ''))
 
     def difficulty_changed(self):
         self.curr_difficulty = self.difficulty_slider.value()
