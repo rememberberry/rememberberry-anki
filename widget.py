@@ -22,9 +22,7 @@ class ConfigWidget(QWidget):
         except:
             self.config = {'version': 1,
                            'sentence_decks': [],
-                           'active_vocabulary_decks': [],
-                           'known_vocabulary_decks': [], 
-                           'added': []}
+                           'active_vocabulary_decks': []}
 
     @classmethod
     def config_filename(cls):
@@ -216,6 +214,21 @@ class RememberberryWidget(ConfigWidget):
         self.filter_box.returnPressed.connect(self.search)
         self.filter_box.setPlaceholderText('汉子')
 
+        self.target_deck = QComboBox(self)
+        decks = json.loads(mw.col.db.all("select decks from col")[0][0])
+        selected_did = self.editor.parentWindow.deckChooser.selectedId()
+        selected_index = -1
+        self.decks = {}
+        for i, (deck_id, deck_info) in enumerate(decks.items()):
+            deck_name = deck_info['name']
+            self.target_deck.addItem(deck_name)
+            self.decks[deck_name] = deck_id
+            if int(deck_id) == selected_did:
+                selected_index = i
+
+        if selected_index >= 0:
+            self.target_deck.setCurrentIndex(selected_index)
+
         self.find_tab.layout = QVBoxLayout(self)
         self.find_tab.setLayout(self.find_tab.layout)
         group = QGroupBox()
@@ -223,8 +236,10 @@ class RememberberryWidget(ConfigWidget):
         group.setLayout(group.layout)
         group.layout.addWidget(QLabel('Difficulty'), 0, 0)
         group.layout.addWidget(QLabel('Filter'), 0, 1)
+        group.layout.addWidget(QLabel('Target Deck'), 0, 2)
         group.layout.addWidget(self.difficulty_slider, 1, 0)
         group.layout.addWidget(self.filter_box, 1, 1)
+        group.layout.addWidget(self.target_deck, 1, 2)
         self.find_tab.layout.addWidget(group, 0)
         self.find_tab.layout.addWidget(self.search_button, 1)
         self.table_widget = QTableWidget()
@@ -260,7 +275,9 @@ class RememberberryWidget(ConfigWidget):
         self.filter_box.setFixedWidth(300)
 
     def add(self):
-        target_did = self.editor.parentWindow.deckChooser.selectedId()
+        target_did = self.decks[self.decks_list_widget.selectedItems()[0].text()]
+        showInfo(str(target_did))
+
         note_ids = []
         for row in self.table_widget.selectionModel().selectedRows():
             nid, *_ = self.search_results[row.row()]
@@ -279,12 +296,11 @@ class RememberberryWidget(ConfigWidget):
 
         showInfo('Added %i cards from %s notes' % (len(cards), len(note_ids)))
 
-    def get_translations(self, info):
+    def get_translations(self, word, info):
+        # info is list of notes (nid, field) that matched a word in a sentence
         valid_field_names = ['English', 'english', 'en', 'En', 'eng']
-        info = sorted(info, key=lambda x: len(x[1]))
-        min_length = len(info[0][1])
         for nid, sentence in info:
-            if len(sentence) > min_length:
+            if len(sentence) != len(word):
                 continue
             mid, flds = mw.col.db.all('select mid, flds from notes where id = %s' % nid)[0]
             flds = flds.split('\x1f')
@@ -381,7 +397,7 @@ class RememberberryWidget(ConfigWidget):
                 elif start > curr_idx:
                     cloze += field[curr_idx:start]
                 else:
-                    translations = self.get_translations(info)
+                    translations = self.get_translations(field[start:end], info)
                     cloze += '{{c%i::%s::%s}}' % (next_close_idx, field[start:end], '|'.join(translations))
                     if not joint:
                         next_close_idx += 1
@@ -471,20 +487,22 @@ class RememberberryWidget(ConfigWidget):
         vocab_strengths = defaultdict(list)
         vocab_info = defaultdict(list)
 
-        def _iter_note_hanzi(deck_name):
+        def _iter_note_hanzi(deck_name, filter_known=False):
             did = self.get_did_from_name(deck_name, decks)
             if did is None:
                 return
-            cards = mw.col.db.all("select nid, max(reps-lapses) from cards where did=%s group by nid" % did)
-            ids_str = ', '.join(str(nid) for nid, _ in cards)
+            extra = 'and data!="ignore" ' if filter_known else ''
+            cards = mw.col.db.all("select nid, max(reps-lapses), data from cards where did=%s %sgroup by nid" % (did, extra))
+
+            ids_str = ', '.join(str(nid) for nid, _, _ in cards)
             note_fields = mw.col.db.all("select id, flds from notes where id in (%s)" % ids_str)
             note_fields = {nid: fields.split('\x1f') for nid, fields in note_fields}
-            for nid, reps_min_lapses in cards:
+            for nid, reps_min_lapses, data in cards:
                 fields = note_fields[nid]
                 for i, field in enumerate(fields):
                     if len(filter_text_hanzi(field)) == 0:
                         continue
-                    yield nid, reps_min_lapses, i, fields
+                    yield nid, 10 if data == 'ignore' else reps_min_lapses, i, fields
 
         for deck_name, is_known in user_decks:
             for nid, reps_min_lapses, field_idx, fields in _iter_note_hanzi(deck_name):
@@ -504,7 +522,7 @@ class RememberberryWidget(ConfigWidget):
         # Go through sentence decks, collect statistics
         sentences = []
         for deck_name in sentence_decks:
-            for nid, reps_min_lapses, field_idx, fields in _iter_note_hanzi(deck_name):
+            for nid, reps_min_lapses, field_idx, fields in _iter_note_hanzi(deck_name, True):
                 field = fields[field_idx]
                 words = []
                 curr_idx = 0
