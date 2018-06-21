@@ -257,13 +257,20 @@ class RememberberryWidget(ConfigWidget):
         add_button.clicked.connect(self.add)
         add_cloze_button = QPushButton('Add as Cloze')
         add_cloze_button.clicked.connect(self.add_cloze)
+        mark_sentences_button = QPushButton('Mark Sentence(s)')
+        mark_sentences_button.clicked.connect(self.mark_sentences)
+        mark_words_button = QPushButton('Mark Words(s)')
+        mark_words_button.clicked.connect(self.mark_words)
+
         close_button = QPushButton('Close')
         close_button.clicked.connect(self.close)
         button_group.layout.addWidget(add_button, 0, 0)
         button_group.layout.addWidget(add_cloze_button, 0, 1)
-        button_group.layout.addWidget(close_button, 0, 2)
+        button_group.layout.addWidget(mark_sentences_button, 0, 2)
+        button_group.layout.addWidget(mark_words_button, 0, 3)
+        button_group.layout.addWidget(close_button, 0, 4)
         button_group.setFixedHeight(50)
-        button_group.setFixedWidth(400)
+        button_group.setFixedWidth(650)
         add_button.setFixedWidth(110)
         add_cloze_button.setFixedWidth(110)
         close_button.setFixedWidth(110)
@@ -295,6 +302,105 @@ class RememberberryWidget(ConfigWidget):
             mw.col.db.execute(insert_query, *new_card)
 
         showInfo('Added %i cards from %s notes' % (len(cards), len(note_ids)))
+
+    def mark_sentences(self):
+        selected_rows = self.table_widget.selectionModel().selectedRows()
+        if len(selected_rows) == 0:
+            showInfo("No sentences selected")
+            return
+
+        dialog = QDialog()
+        dialog.layout = QVBoxLayout(self)
+
+        note = QLabel('Sentences selected: %i' % len(selected_rows))
+        dialog.layout.addWidget(note, 0)
+
+        def _mark(mark_type):
+            for row in self.table_widget.selectionModel().selectedRows():
+                nid, *_ = self.search_results[row.row()]
+                query = 'update cards set data=? where nid=?'
+                mw.col.db.execute(query, mark_type, nid)
+            dialog.close()
+
+        ignore_button = QPushButton("Mark as Ignored")
+        dialog.layout.addWidget(ignore_button, 2)
+        ignore_button.clicked.connect(partial(_mark, 'ignore'))
+
+        known_button = QPushButton("Mark as Known")
+        dialog.layout.addWidget(known_button, 3)
+        known_button.clicked.connect(partial(_mark, 'known'))
+
+        cancel_button = QPushButton("Cancel")
+        dialog.layout.addWidget(cancel_button, 4)
+        cancel_button.clicked.connect(lambda: dialog.close())
+        dialog.setWindowTitle("Mark Sentences")
+        dialog.setWindowModality(Qt.ApplicationModal)
+        dialog.setLayout(dialog.layout)
+        dialog.exec_()
+
+    def mark_words(self):
+        selected_rows = self.table_widget.selectionModel().selectedRows()
+        if len(selected_rows) == 0:
+            showInfo("No sentences selected")
+            return
+
+        for row in self.table_widget.selectionModel().selectedRows():
+            nid, field_idx, fields, words, _ = self.search_results[row.row()]
+            field = fields[field_idx]
+
+            # Sort by start index
+            words = sorted(words, key=lambda w: w[1])
+            self.select_mark_words_dialog(nid, words, fields, field_idx)
+
+    def select_mark_words_dialog(self, nid, words, fields, field_idx):
+        dialog = QDialog()
+        dialog.layout = QVBoxLayout(self)
+
+        note = QLabel('Note:\n' + '\n'.join(fields))
+        dialog.layout.addWidget(note, 0)
+
+        model = QStandardItemModel()
+        items = []
+        word_indices = []
+        for i, (info, start, end, strength) in enumerate(words):
+            if strength < 0:
+                continue
+            item = QStandardItem(fields[field_idx][start:end])
+            item.setCheckState(Qt.Checked if 0 <= strength < 1 else Qt.Unchecked)
+            item.setCheckable(True)
+            model.appendRow(item)
+            items.append(item)
+            word_indices.append(i)
+
+        view = QListView()
+        view.setModel(model)
+        dialog.layout.addWidget(view, 1)
+
+        def _mark(mark_type):
+            selected = []
+            for item, i in zip(items, word_indices):
+                if item.checkState() != Qt.Checked:
+                    continue
+                nid, *_ = words[i]
+                query = 'update cards set data=? where nid=?'
+                mw.col.db.execute(query, mark_type, nid)
+            dialog.close()
+
+        ignore_button = QPushButton("Mark as Ignored")
+        dialog.layout.addWidget(ignore_button, 2)
+        ignore_button.clicked.connect(partial(_mark, 'ignore'))
+
+        known_button = QPushButton("Mark as Known")
+        dialog.layout.addWidget(known_button, 3)
+        known_button.clicked.connect(partial(_mark, 'known'))
+
+        cancel_button = QPushButton("Cancel")
+        dialog.layout.addWidget(cancel_button, 4)
+        cancel_button.clicked.connect(lambda: dialog.close())
+        dialog.setWindowTitle("Cloze Words")
+        dialog.setWindowModality(Qt.ApplicationModal)
+        dialog.setLayout(dialog.layout)
+        dialog.exec_()
 
     def get_translations(self, word, info):
         # info is list of notes (nid, field) that matched a word in a sentence
@@ -487,11 +593,11 @@ class RememberberryWidget(ConfigWidget):
         vocab_strengths = defaultdict(list)
         vocab_info = defaultdict(list)
 
-        def _iter_note_hanzi(deck_name, filter_known=False):
+        def _iter_note_hanzi(deck_name, filter_ignored=False):
             did = self.get_did_from_name(deck_name, decks)
             if did is None:
                 return
-            extra = 'and data!="ignore" ' if filter_known else ''
+            extra = 'and data!="ignore" ' if filter_ignored else ''
             cards = mw.col.db.all("select nid, max(reps-lapses), data from cards where did=%s %sgroup by nid" % (did, extra))
 
             ids_str = ', '.join(str(nid) for nid, _, _ in cards)
@@ -502,7 +608,7 @@ class RememberberryWidget(ConfigWidget):
                 for i, field in enumerate(fields):
                     if len(filter_text_hanzi(field)) == 0:
                         continue
-                    yield nid, 10 if data == 'ignore' else reps_min_lapses, i, fields
+                    yield nid, 10 if data == 'known' else reps_min_lapses, i, fields
 
         for deck_name, is_known in user_decks:
             for nid, reps_min_lapses, field_idx, fields in _iter_note_hanzi(deck_name):
