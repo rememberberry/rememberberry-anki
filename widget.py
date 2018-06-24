@@ -365,7 +365,7 @@ class RememberberryWidget(ConfigWidget):
         self.filter_box.setFixedWidth(300)
 
     def add(self):
-        target_did = self.editor.parentWindow.deckChooser.selectedId()
+        target_did = self.decks[self.target_deck.currentText()]
 
         note_ids = [self.search_results[row.row()][0]
                     for row in self.table_widget.selectionModel().selectedRows()]
@@ -597,7 +597,7 @@ class RememberberryWidget(ConfigWidget):
             showInfo("No sentences selected")
             return
 
-        target_did = self.editor.parentWindow.deckChooser.selectedId()
+        target_did = self.decks[self.target_deck.currentText()]
         added = 0
         remove = []
         for row in self.table_widget.selectionModel().selectedRows():
@@ -629,13 +629,13 @@ class RememberberryWidget(ConfigWidget):
                 cloze += field[curr_idx:]
 
             cloze_model = mw.col.models.byName("Cloze")
+            cloze_model['did'] = target_did
+            mw.col.models.save(cloze_model)
             mw.col.models.setCurrent(cloze_model)
-            f = mw.col.newNote()
+            f = mw.col.newNote(forDeck=False)
             f['Text'] = cloze
             f['Extra'] = '<br/>'.join([f for i, f in enumerate(fields) if i != field_idx])
             mw.col.addNote(f)
-            cloze_model['did'] = target_did
-            mw.col.models.save(cloze_model)
 
             mw.col.db.execute('update cards set data="added" where nid=?', nid)
 
