@@ -149,33 +149,22 @@ class RememberberryWidget(ConfigWidget):
         self.tabs = QTabWidget()
         self.find_tab = QWidget()	
         self.decks_tab = QWidget()
+        self.settings_tab = QWidget()
  
         # Add tabs
         self.tabs.addTab(self.find_tab, 'Find')
         self.tabs.addTab(self.decks_tab, 'Decks')
+        self.tabs.addTab(self.settings_tab, 'Settings')
 
         # Create find tab
         self.create_find_tab()
  
         # Create decks tab
-        self.decks_tab.layout = QGridLayout(self)
-        self.decks_tab.layout.setSpacing(5)
-        self.sentence_deck_choice = DeckMultipleChoice('sentence_decks')
-        self.decks_tab.layout.addWidget(QLabel('Decks to draw sentences from:', self), 0, 0)
-        self.decks_tab.layout.addWidget(self.sentence_deck_choice, 1, 0)
+        self.create_decks_tab()
 
-        l1 = QLabel('Decks where you keep active vocab and sentences:', self); l1.setWordWrap(True)
-        self.decks_tab.layout.addWidget(l1, 2, 0)
-        self.active_vocabulary_deck_choice = DeckMultipleChoice('active_vocabulary_decks')
-        self.decks_tab.layout.addWidget(self.active_vocabulary_deck_choice, 3, 0)
-        l2 = QLabel(('Decks where you keep known vocab which is not active '
-                    '(e.g. HSK decks). For example, if you are HSK level 4, '
-                    'you can add HSK 1-3 here as "known" decks:'), self); l2.setWordWrap(True)
-        self.decks_tab.layout.addWidget(l2, 4, 0)
-        self.known_vocabulary_deck_choice = DeckMultipleChoice('known_vocabulary_decks')
-        self.decks_tab.layout.addWidget(self.known_vocabulary_deck_choice, 5, 0)
+        # Create settings tab
+        self.create_settings_tab()
 
-        self.decks_tab.setLayout(self.decks_tab.layout)
         self.tabs.currentChanged.connect(self.on_tab_changed)
  
         # Add tabs to widget        
@@ -195,6 +184,100 @@ class RememberberryWidget(ConfigWidget):
         if len(dids) == 0:
             return None
         return dids[0]
+
+    def update_mark_items(self, mark_type):
+        nids = [c[0] for c in mw.col.db.all('select nid from cards where data="%s"' % mark_type)]
+        nids = set(nids)
+        ids_str = ', '.join(str(nid) for nid in nids)
+        note_fields = mw.col.db.all("select id, flds from notes where id in (%s)" % ids_str)
+        note_fields = {nid: fields.split('\x1f') for nid, fields in note_fields}
+        self.mark_notes[mark_type] = []
+        for nid in nids:
+            fields = note_fields[nid]
+            hanzi = []
+            for i, field in enumerate(fields):
+                h = filter_text_hanzi(field)
+                if len(h) > 0:
+                    hanzi.append(h)
+            self.mark_notes[mark_type].append((nid, '|'.join(hanzi)))
+
+        model = QStandardItemModel()
+
+        model.removeRows(0, model.rowCount())
+        it = []
+        model = QStandardItemModel()
+        for _, label in self.mark_notes[mark_type]:
+            item = QStandardItem(label)
+            item.setCheckState(Qt.Unchecked)
+            item.setCheckable(True)
+            it.append(item)
+            model.appendRow(item)
+
+        self.mark_items[mark_type] = it
+        self.mark_views[mark_type].setModel(model)
+
+    def create_settings_tab(self):
+        self.mark_notes, self.mark_items = {}, {}
+        self.settings_tab.layout = QGridLayout(self)
+        self.settings_tab.layout.addWidget(QLabel('Ignored:', self), 0, 0)
+        self.settings_tab.layout.addWidget(QLabel('Known:', self), 0, 1)
+
+        self.mark_views = {'ignore': QListView(), 'known': QListView()}
+        self.settings_tab.layout.addWidget(self.mark_views['ignore'], 1, 0)
+        self.settings_tab.layout.addWidget(self.mark_views['known'], 1, 1)
+
+        self.update_mark_items('ignore')
+        self.update_mark_items('known')
+
+        def _remove(mark_type):
+            remove_indices = set()
+            for i, item in enumerate(self.mark_items[mark_type]):
+                if item.checkState() != Qt.Checked:
+                    continue
+                remove_indices.add(i)
+                nid, _ = self.mark_notes[mark_type][i]
+                query = 'update cards set data="" where nid=?'
+                mw.col.db.execute(query, nid)
+                self.redo_search = True
+
+            self.update_mark_items(mark_type)
+
+
+        remove_ignored_button = QPushButton('Remove Ignored')
+        remove_ignored_button.clicked.connect(partial(_remove, 'ignore'))
+        self.settings_tab.layout.addWidget(remove_ignored_button, 2, 0)
+
+        remove_known_button = QPushButton('Remove Known')
+        remove_known_button.clicked.connect(partial(_remove, 'known'))
+        self.settings_tab.layout.addWidget(remove_known_button, 2, 1)
+
+        self.settings_tab.setLayout(self.settings_tab.layout)
+
+
+    @pyqtSlot()
+    def on_active_changed(self):
+        self.read_config()
+        self.config[self.config_key] = self.combo_box.currentText()
+
+    def create_decks_tab(self):
+        self.decks_tab.layout = QGridLayout(self)
+        self.decks_tab.layout.setSpacing(5)
+        self.sentence_deck_choice = DeckMultipleChoice('sentence_decks')
+        self.decks_tab.layout.addWidget(QLabel('Decks to draw sentences from:', self), 0, 0)
+        self.decks_tab.layout.addWidget(self.sentence_deck_choice, 1, 0)
+
+        l1 = QLabel('Decks where you keep active vocab and sentences:', self); l1.setWordWrap(True)
+        self.decks_tab.layout.addWidget(l1, 2, 0)
+        self.active_vocabulary_deck_choice = DeckMultipleChoice('active_vocabulary_decks')
+        self.decks_tab.layout.addWidget(self.active_vocabulary_deck_choice, 3, 0)
+        l2 = QLabel(('Decks where you keep known vocab which is not active '
+                    '(e.g. HSK decks). For example, if you are HSK level 4, '
+                    'you can add HSK 1-3 here as "known" decks:'), self); l2.setWordWrap(True)
+        self.decks_tab.layout.addWidget(l2, 4, 0)
+        self.known_vocabulary_deck_choice = DeckMultipleChoice('known_vocabulary_decks')
+        self.decks_tab.layout.addWidget(self.known_vocabulary_deck_choice, 5, 0)
+
+        self.decks_tab.setLayout(self.decks_tab.layout)
 
     def create_find_tab(self):
         self.search_button = QPushButton('Search')
@@ -282,14 +365,10 @@ class RememberberryWidget(ConfigWidget):
         self.filter_box.setFixedWidth(300)
 
     def add(self):
-        target_did = self.decks[self.decks_list_widget.selectedItems()[0].text()]
-        showInfo(str(target_did))
+        target_did = self.editor.parentWindow.deckChooser.selectedId()
 
-        note_ids = []
-        for row in self.table_widget.selectionModel().selectedRows():
-            nid, *_ = self.search_results[row.row()]
-            notes = mw.col.db.all('select * from notes where id = %i' % nid)
-            note_ids.append(nid)
+        note_ids = [self.search_results[row.row()][0]
+                    for row in self.table_widget.selectionModel().selectedRows()]
 
         note_ids_str = ', '.join([str(n) for n in note_ids])
         cards = mw.col.db.all('select * from cards where nid in (%s)' % note_ids_str)
@@ -301,6 +380,10 @@ class RememberberryWidget(ConfigWidget):
             insert_query = 'insert into cards values (%s)' % templ_str
             mw.col.db.execute(insert_query, *new_card)
 
+        for nid in note_ids:
+            mw.col.db.execute('update cards set data="added" where nid=?', nid)
+
+        self.remove_table_rows(row.row() for row in self.table_widget.selectionModel().selectedRows())
         showInfo('Added %i cards from %s notes' % (len(cards), len(note_ids)))
 
     def mark_sentences(self):
@@ -316,10 +399,19 @@ class RememberberryWidget(ConfigWidget):
         dialog.layout.addWidget(note, 0)
 
         def _mark(mark_type):
+            remove = []
             for row in self.table_widget.selectionModel().selectedRows():
                 nid, *_ = self.search_results[row.row()]
                 query = 'update cards set data=? where nid=?'
                 mw.col.db.execute(query, mark_type, nid)
+                remove.append(row.row())
+
+            self.update_mark_items(mark_type)
+
+            for row in remove:
+                self.table_widget.removeRow(row)
+            self.search_results = [s for i, s in enumerate(self.search_results)
+                                   if i not in remove]
             dialog.close()
 
         ignore_button = QPushButton("Mark as Ignored")
@@ -338,19 +430,33 @@ class RememberberryWidget(ConfigWidget):
         dialog.setLayout(dialog.layout)
         dialog.exec_()
 
+    def remove_table_rows(self, rows):
+        for row in rows:
+            self.table_widget.removeRow(row)
+
+        self.search_results = [s for i, s in enumerate(self.search_results)
+                               if i not in rows]
+
+
     def mark_words(self):
         selected_rows = self.table_widget.selectionModel().selectedRows()
         if len(selected_rows) == 0:
             showInfo("No sentences selected")
             return
 
+        remove = []
         for row in self.table_widget.selectionModel().selectedRows():
             nid, field_idx, fields, words, _ = self.search_results[row.row()]
             field = fields[field_idx]
 
             # Sort by start index
             words = sorted(words, key=lambda w: w[1])
-            self.select_mark_words_dialog(nid, words, fields, field_idx)
+            if not self.select_mark_words_dialog(nid, words, fields, field_idx):
+                # not cancelled
+                remove.append(row.row())
+
+        self.remove_table_rows(remove)
+
 
     def select_mark_words_dialog(self, nid, words, fields, field_idx):
         dialog = QDialog()
@@ -381,9 +487,13 @@ class RememberberryWidget(ConfigWidget):
             for item, i in zip(items, word_indices):
                 if item.checkState() != Qt.Checked:
                     continue
-                nid, *_ = words[i]
+
+                info_words = sorted(words[i][0], key=lambda w: len(w[1]))
+                nid, _ = info_words[0] # use the shortest info word
                 query = 'update cards set data=? where nid=?'
                 mw.col.db.execute(query, mark_type, nid)
+
+            self.update_mark_items(mark_type)
             dialog.close()
 
         ignore_button = QPushButton("Mark as Ignored")
@@ -396,11 +506,17 @@ class RememberberryWidget(ConfigWidget):
 
         cancel_button = QPushButton("Cancel")
         dialog.layout.addWidget(cancel_button, 4)
-        cancel_button.clicked.connect(lambda: dialog.close())
+        cancelled = False
+        def _cancel():
+            nonlocal cancelled
+            cancelled = True
+            dialog.close()
+        cancel_button.clicked.connect(_cancel)
         dialog.setWindowTitle("Cloze Words")
         dialog.setWindowModality(Qt.ApplicationModal)
         dialog.setLayout(dialog.layout)
         dialog.exec_()
+        return cancelled
 
     def get_translations(self, word, info):
         # info is list of notes (nid, field) that matched a word in a sentence
@@ -483,8 +599,9 @@ class RememberberryWidget(ConfigWidget):
 
         target_did = self.editor.parentWindow.deckChooser.selectedId()
         added = 0
+        remove = []
         for row in self.table_widget.selectionModel().selectedRows():
-            _, field_idx, fields, words, _ = self.search_results[row.row()]
+            nid, field_idx, fields, words, _ = self.search_results[row.row()]
             field = fields[field_idx]
 
             # Sort by start index
@@ -511,7 +628,7 @@ class RememberberryWidget(ConfigWidget):
             if curr_idx < len(field):
                 cloze += field[curr_idx:]
 
-            cloze_model = mw.col.models.byName("Cloze hint")
+            cloze_model = mw.col.models.byName("Cloze")
             mw.col.models.setCurrent(cloze_model)
             f = mw.col.newNote()
             f['Text'] = cloze
@@ -519,7 +636,13 @@ class RememberberryWidget(ConfigWidget):
             mw.col.addNote(f)
             cloze_model['did'] = target_did
             mw.col.models.save(cloze_model)
+
+            mw.col.db.execute('update cards set data="added" where nid=?', nid)
+
             added += 1 if joint else next_close_idx - 1
+            remove.append(row.row())
+
+        self.remove_table_rows(remove)
 
         if added > 0:
             showInfo('Added %i card%s' % (added, 's' if added > 1 else ''))
@@ -593,11 +716,11 @@ class RememberberryWidget(ConfigWidget):
         vocab_strengths = defaultdict(list)
         vocab_info = defaultdict(list)
 
-        def _iter_note_hanzi(deck_name, filter_ignored=False):
+        def _iter_note_hanzi(deck_name, filter_marked=False):
             did = self.get_did_from_name(deck_name, decks)
             if did is None:
                 return
-            extra = 'and data!="ignore" ' if filter_ignored else ''
+            extra = 'and data=="" ' if filter_marked else ''
             cards = mw.col.db.all("select nid, max(reps-lapses), data from cards where did=%s %sgroup by nid" % (did, extra))
 
             ids_str = ', '.join(str(nid) for nid, _, _ in cards)
@@ -612,7 +735,13 @@ class RememberberryWidget(ConfigWidget):
 
         for deck_name, is_known in user_decks:
             for nid, reps_min_lapses, field_idx, fields in _iter_note_hanzi(deck_name):
-                for word in split_hanzi(fields[field_idx]):
+                splits = split_hanzi(fields[field_idx])
+                if len(splits) != 1:
+                    # add the sentence as well, so they're filtered out in the
+                    # sentence search
+                    splits.append(fields[field_idx])
+
+                for word in splits:
                     vocab_strengths[word].append(1.0 if is_known else
                                                  min((reps_min_lapses) / 10, 1.0))
                     vocab_info[word].append((nid, fields[field_idx]))
