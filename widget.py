@@ -171,6 +171,8 @@ class RememberberryWidget(ConfigWidget):
         self.layout.addWidget(self.tabs)
         self.setLayout(self.layout)
 
+        self.filter_box.setFocus(True)
+
 
     @pyqtSlot()
     def on_tab_changed(self):
