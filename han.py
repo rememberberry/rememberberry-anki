@@ -24,14 +24,8 @@ jieba.dt.cache_file = None
 jieba.setLogLevel(logging.CRITICAL)
 
 def is_hanzi(char):
-    ord('\u4E00')
     ranges = [('\u4E00', '\u9FFF'),
               ('\u3400', '\u4DBF'),
-              #('\u20000', '\u2A6DF'),
-              #('\u2A700', '\u2B73F'),
-              #('\u2B740', '\u2B81F'),
-              #('\u2B820', '\u2CEAF'),
-              #('\u2F800', '\u2FA1F'),
               ('\uF900', '\uFAFF')]
     for start, end in ranges:
         try:

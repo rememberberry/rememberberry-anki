@@ -9,7 +9,9 @@ from anki.utils import ids2str, fieldChecksum, stripHTML, \
     intTime, splitFields, joinFields, maxID, json, devMode
 
 from .han import filter_text_hanzi, is_hanzi, split_hanzi
+from .cedict import load_cedict
 from collections import defaultdict
+
 
 class ConfigWidget(QWidget):
     def __init__(self):
@@ -131,6 +133,8 @@ class RememberberryWidget(ConfigWidget):
         self.num_columns = 4
         self.editor = editor
         self.redo_search = True
+        file_dir = os.path.dirname(__file__)
+        self.cedict = load_cedict(os.path.join(file_dir, 'corpus/sources/cedict_ts.u8'))
 
         def _close(orig_self, orig_close):
             self.close()
@@ -354,7 +358,7 @@ class RememberberryWidget(ConfigWidget):
         button_group.layout.addWidget(mark_sentences_button, 0, 2)
         button_group.layout.addWidget(mark_words_button, 0, 3)
         button_group.layout.addWidget(close_button, 0, 4)
-        button_group.setFixedHeight(50)
+        button_group.setFixedHeight(75)
         button_group.setFixedWidth(650)
         add_button.setFixedWidth(110)
         add_cloze_button.setFixedWidth(110)
@@ -439,7 +443,6 @@ class RememberberryWidget(ConfigWidget):
         self.search_results = [s for i, s in enumerate(self.search_results)
                                if i not in rows]
 
-
     def mark_words(self):
         selected_rows = self.table_widget.selectionModel().selectedRows()
         if len(selected_rows) == 0:
@@ -458,7 +461,6 @@ class RememberberryWidget(ConfigWidget):
                 remove.append(row.row())
 
         self.remove_table_rows(remove)
-
 
     def select_mark_words_dialog(self, nid, words, fields, field_idx):
         dialog = QDialog()
@@ -524,6 +526,10 @@ class RememberberryWidget(ConfigWidget):
         # info is list of notes (nid, field) that matched a word in a sentence
         valid_field_names = ['English', 'english', 'en', 'En', 'eng']
         for nid, sentence in info:
+            if nid == -1:
+                yield self.cedict[sentence][-1] # cedict translation
+                continue
+
             if len(sentence) != len(word):
                 continue
             mid, flds = mw.col.db.all('select mid, flds from notes where id = %s' % nid)[0]
@@ -593,7 +599,6 @@ class RememberberryWidget(ConfigWidget):
                 selected.append(i)
         return selected, is_joint
 
-
     def add_cloze(self):
         if len(self.table_widget.selectionModel().selectedRows()) == 0:
             showInfo("No sentences selected")
@@ -623,7 +628,9 @@ class RememberberryWidget(ConfigWidget):
                     cloze += field[curr_idx:start]
                 else:
                     translations = self.get_translations(field[start:end], info)
-                    cloze += '{{c%i::%s::%s}}' % (next_close_idx, field[start:end], '|'.join(translations))
+                    cloze += '{{c%i::%s::%s}}' % (next_close_idx,
+                                                  field[start:end],
+                                                  list(translations)[0])
                     if not joint:
                         next_close_idx += 1
                 curr_idx = end
@@ -659,7 +666,10 @@ class RememberberryWidget(ConfigWidget):
             self.prepare_search()
             self.redo_search = False
 
-        sentence_filter = lambda s: self.curr_difficulty < s[-1] < self.max_difficulty and filter_text in s[2][s[1]]
+        if filter_text != '':
+            sentence_filter = lambda s: filter_text in s[2][s[1]]
+        else:
+            sentence_filter = lambda s: self.curr_difficulty < s[-1] < self.max_difficulty
         sentences = sorted([s for s in self.sentences if sentence_filter(s)],
                            key=lambda x: x[-1])
         self.search_results = sentences[:self.max_num_results]
@@ -738,15 +748,23 @@ class RememberberryWidget(ConfigWidget):
         for deck_name, is_known in user_decks:
             for nid, reps_min_lapses, field_idx, fields in _iter_note_hanzi(deck_name):
                 splits = split_hanzi(fields[field_idx])
+
                 if len(splits) != 1:
                     # add the sentence as well, so they're filtered out in the
                     # sentence search
+                    splits.append(''.join(splits))
                     splits.append(fields[field_idx])
 
                 for word in splits:
                     vocab_strengths[word].append(1.0 if is_known else
                                                  min((reps_min_lapses) / 10, 1.0))
                     vocab_info[word].append((nid, fields[field_idx]))
+
+        for i, (trad, simpl, *_) in enumerate(self.cedict):
+            for w in [trad, simpl]:
+                vocab_info[w].append((-1, i))
+                vocab_strengths[w].append(0.0)
+
 
         # Build a map from first character to full words
         char_to_words = defaultdict(list)
@@ -778,6 +796,9 @@ class RememberberryWidget(ConfigWidget):
 
                     for word in char_to_words[curr_char]:
                         if field[curr_idx:curr_idx+len(word)] != word:
+                            continue
+                        if (len(word) == len(field) or
+                           len(filter_text_hanzi(word)) == len(filter_text_hanzi(field))):
                             continue
                         strength = min(1.0, sum(vocab_strengths[word]))
                         words.append((vocab_info[word], curr_idx, curr_idx+len(word), strength))
