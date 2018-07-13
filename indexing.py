@@ -20,24 +20,17 @@ import os
 import re
 import json
 import pickle
+import sqlite3
 from collections import defaultdict
 from aqt import mw
 
-
-all_decks = None
-cedict = None
-cedict_char_to_idx = None
-
-cedict_to_nids, nid_to_cedicts = {}, {}
-cedict_to_sentence_nids, sentence_nid_to_cedicts = {}, {}
-
-def _get_did_from_name(deck_name):
-    dids = [deck_id for (deck_id, deck_info) in all_decks.items()
-           if deck_info['name'] == deck_name]
-    if len(dids) == 0:
-        return None
-    return dids[0]
-
+def _get_content_hash_and_str(json_content):
+    content = json.dumps(c)
+    m = hashlib.sha256()
+    m.update(content)
+    h = m.digest()
+    h_64 = int.from_bytes(h[:8], 'big')
+    return h_64, content
 
 def _load_cedict(filename):
     cedict = []
@@ -64,45 +57,166 @@ def _load_cedict(filename):
     return cedict, cedict_char_to_idx
 
 
-def _iter_notes(deck_name, filter_marked=False):
-    did = _get_did_from_name(deck_name)
-    if did is None:
-        return
-    extra = 'and data=="" ' if filter_marked else ''
-    nids = mw.col.db.all("select nid from cards where did=%s %sgroup by nid" % (did, extra))
-    ids_str = ', '.join(str(nid[0]) for nid in nids)
-    note_fields = mw.col.db.all("select id, flds from notes where id in (%s)" % ids_str)
-    for nid, fields in note_fields:
-        yield nid, fields.split('\x1f')
+class RememberberryDatabase:
+    def __init__(self, filename):
+        mw.col.db.execute("ATTACH DATABASE ? AS rb", filename)
+        self.all_decks = None
+        self.all_models = None
 
+    def _get_did_from_name(self, deck_name):
+        dids = [deck_id for (deck_id, deck_info) in self.all_decks.items()
+               if deck_info['name'] == deck_name]
+        if len(dids) == 0:
+            return None
+        return dids[0]
 
-def _get_cedict_note_maps(decks):
-    nid_to_cedicts = defaultdict(list)
-    cedict_to_nids = defaultdict(list)
-    for deck in decks:
-        for nid, fields in _iter_notes(deck):
-            for field_idx, field in enumerate(fields):
-                taken = len(field)*[0]
-                for char_idx, char in enumerate(field):
+    def _iter_notes(self, deck_name, filter_marked=False):
+        did = self._get_did_from_name(deck_name)
+        if did is None:
+            return
+        extra = 'and data=="" ' if filter_marked else ''
+        res = mw.col.db.all("select nid, max(reps-lapses), data from cards where did=%s %sgroup by nid" % (did, extra))
+        other = {nid: _ for nid, *_ in res}
+        ids_str = ', '.join(str(nid) for nid, *_ in res)
+        note_fields = mw.col.db.all("select id, flds, mid from notes where id in (%s)" % ids_str)
+        for nid, fields, mid in note_fields:
+            yield (nid, mid, fields.split('\x1f'), *other[nid])
+
+    def _get_field_from_name(self, mid, fields, valid_names):
+        for i, f in self.all_models[mid]['flds']:
+            if f['name'].tolower() in valid_names:
+                return fields[i]
+        return None
+
+    def _iter_notes_cedicts(self, decks):
+        hanzi_names = set(['hanzi', 'characters', 'simplified', 'Simplified'])
+        pinyin_names = set(['pinyin'])
+        english_names = set(['english', 'translation'])
+        for deck in decks:
+            for nid, mid, fields, *_ in self._iter_notes(deck):
+                hanzi_field = self._get_field_from_name(mid, fields, hanzi_names)
+                pinyin_field = self._get_field_from_name(mid, fields, pinyin_names)
+                english_field = self._get_field_from_name(mid, fields, english_names)
+
+                taken = len(hanzi_field)*[0]
+                cedicts = []
+                for char_idx, char in enumerate(hanzi_field):
                     for cedict_idx, hz_type in cedict_char_to_idx[char]:
                         hz = cedict[cedict_idx][hz_type]
-                        if field[char_idx:char_idx+len(hz)] != hz:
+                        if hanzi_field[char_idx:char_idx+len(hz)] != hz:
                             continue
                         if sum(taken[char_idx:char_idx+len(hz)]) > 0:
                             continue
 
-                        nid_to_cedicts[nid].append((cedict_idx, hz_type, field_idx, char_idx))
-                        cedict_to_nids[cedict_idx].append((nid, hz_type, field_idx, char_idx))
+                        cedicts.append((cedict_idx, char_idx, len(hz)))
                         taken[char_idx:char_idx+len(hz)] = len(hz)*[1]
+                yield nid, hanzi_field, pinyin_field, english_field, cedicts
 
-    return cedict_to_nids, nid_to_cedicts
+    def update(self, word_decks):
+        # 
+        pass
+
+    def create(self, word_decks, sentence_decks):
+        self.all_decks = json.loads(mw.col.db.all("select decks from col")[0][0])
+        self.all_models = json.loads(mw.col.db.all("select models from col")[0][0])
+
+        # 1. Create tables
+        c = mw.col.db
+        c.execute('DROP TABLE rb.items, rb.item_links, rb.note_links')
+        c.execute('''
+            CREATE TABLE rb.items (
+                hash INTEGER PRIMARY KEY,
+                prev_hash INTEGER,
+                content VARCHAR,
+                type VARCHAR
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE rb.item_links (
+                FOREIGN KEY(from_hash) REFERENCES items(hash),
+                FOREIGN KEY(to_hash) REFERENCES items(hash),
+                pointer VARCHAR
+                PRIMARY KEY (from_hash, to_hash)
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE rb.note_links (
+                FOREIGN KEY(hash) REFERENCES items(hash),
+                note_id INTEGER
+                PRIMARY KEY (hash, note_id)
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE rb.scores (
+                FOREIGN KEY(hash) REFERENCES items(hash),
+                sum_score INTEGER,
+                max_score INTEGER
+                PRIMARY KEY hash
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE rb.hsk (
+                FOREIGN KEY(hash) REFERENCES items(hash),
+                level INTEGER
+                PRIMARY KEY hash
+            )
+        ''')
+
+        # 2. Load cedict into items
+        # 2.1. Load the cedict file
+        sources_dir = os.path.join(os.path.dirname(__file__), 'corpus')
+        cedict_file = os.path.join(sources_dir, 'cedict_ts.u8')
+        cedict, cedict_char_to_idx = _load_cedict(cedict_file)
+
+        # 2.2. Load HSK files
+        hsk = {}
+        for lvl in range(1, 7):
+            cedict_file = os.path.join(sources_dir, 'HSK%i.txt' % lvl)
+            lvl_words = set(open(cedict_file, 'r').readlines())
+            hsk[lvl] = lvl_words
+
+        # 2.3. Create json content for each and hash it
+        cedict_hash_json = []
+        cedict_hsk = []
+        for c in cedict:
+            h_64, content = _get_content_hash_and_str(c)
+            cedict_hash_json.append((h_64, content))
+            word_level = 0
+            for lvl in range(1, 7):
+                if c[1] in hsk[lvl]:
+                    word_level = lvl
+                    break
+            cedict_hsk.append((h_64, word_level))
 
 
-def load_cedict_index():
-    global all_decks, cedict, cedict_char_to_idx
-    all_decks = json.loads(mw.col.db.all("select decks from col")[0][0])
-    cedict_file = os.path.join(os.path.dirname(__file__), 'corpus/sources/cedict_ts.u8')
-    cedict, cedict_char_to_idx = _load_cedict(cedict_file)
+        # 2.4. Insert into items table with hash as id
+        c.executemany('''INSERT INTO rb.items VALUES (?, NULL, ?, "cedict")''',
+                      cedict_hash_json)
+
+        # 2.5. Insert into hsk table
+        c.executemany('''INSERT INTO rb.hsk VALUES (?, ?)''', cedict_hsk)
+
+        # 3. Load sentences into items and cross reference cedict and add item links
+        #    Load user words and cross reference cedict and add note links
+        links = []
+        sentences = []
+        sentence_items = list(self._iter_notes_cedicts(sentence_decks))
+        word_items = list(self._iter_notes_cedicts(word_decks))
+        items = (zip(sentence_items, len(sentence_items)*['user_sentence']) +
+                 zip(word_items, len(word_items)*['user_word']))
+        for (nid, hanzi, pinyin, english, cedicts), _type in items:
+            h_64, content = _get_content_hash_and_str([None, hanzi, pinyin, english])
+            sentences.append((h_64, content, _type))
+            for cedict_idx, start, length in cedicts:
+                link_pointer = '%i-%i' % (start, start+length)
+                links.append((h_64, cedict_hash_json[cedict_idx][0], link_pointer))
+
+        c.executemany('''INSERT INTO rb.items VALUES (?, NULL, ?, ?)''', sentences)
+        c.executemany('''INSERT INTO rb.item_links VALUES (?, ?, ?)''', links)
+
+        # 4. Populate/update the scores table
+        self.update(word_decks)
+
 
 
 def load_sentence_index(sentence_decks):
@@ -110,46 +224,33 @@ def load_sentence_index(sentence_decks):
     cedict_to_sentence_nids, sentence_nid_to_cedicts = _get_cedict_note_maps(sentence_decks)
 
 
-def load_word_index(user_decks):
+def load_word_index(word_decks):
     global cedict_to_nids, nid_to_cedicts
-    cedict_to_nids, nid_to_cedicts = _get_cedict_note_maps(user_decks)
+    cedict_to_nids, nid_to_cedicts = _get_cedict_note_maps(word_decks)
 
 
-def create_indexes(user_decks, sentence_decks):
-    load_cedict_index()
-    load_sentence_index(sentence_decks)
-    load_word_index(user_decks)
+def load_word_strengths(word_decks):
+    global nid_to_strength
+    for deck in word_decks:
+        for nid, *_, reps_min_lapses, data in self._iter_notes(deck):
+            reps_min_lapses = 10 if data == 'known' else reps_min_lapses
+            strength = min((reps_min_lapses) / 10, 1.0)
+            nid_to_strength[nid] = strength
 
 
-def _get_indexes_filename(create_dir=False):
-    tmp_dir = os.path.join(os.path.dirname(__file__), 'tmp')
-    if create_dir:
-        try:
-            os.makedirs(tmp_dir)
-        except:
-            pass
-    return os.path.join(tmp_dir, 'indexes.pickle')
-
-
-def save_indexes_to_file(filename=None):
-    indexes_file = filename or _get_indexes_filename(create_dir=True)
-    with open(indexes_file, 'wb') as f:
-        pickle.dump((cedict, cedict_char_to_idx, cedict_to_nids, nid_to_cedicts,
-                     cedict_to_sentence_nids, sentence_nid_to_cedicts), f)
-
-
-def load_indexes_from_file(filename=None):
-    indexes_file = filename or _get_indexes_filename(create_dir=False)
-    with open(indexes_file, 'rb') as f:
-        (cedict, cedict_char_to_idx, cedict_to_nids, nid_to_cedicts,
-         cedict_to_sentence_nids, sentence_nid_to_cedicts) = pickle.load(f)
-
-
-def get_sentence_scores():
-    search_str = "select max(reps-lapses), data from cards where nid=? group by nid"
-    for sentence_nid, cedict_indices in sentence_nid_to_cedicts.items():
-        for cedict_idx, hz_type, field_idx, char_idx in cedict_indices:
-            pass
-
-        reps_min_lapses, data = mw.col.db.all(search_str, nid)[0]
-        strength = 10 if data == 'known' else reps_min_lapses
+def get_sentence_difficulties():
+    for sentence_nid, (cedicts, fields) in sentence_nid_to_cedicts.items():
+        strengths = []
+        cedict_fields = len(fields)*[0]
+        for cedict_idx, _, field_idx, _ in cedicts:
+            max_strength = 0
+            words, _ = cedict_to_nids.get(cedict_idx, ([], []))
+            for nid, *_ in words:
+                strength = nid_to_strength[nid]
+                max_strength = max(max_strength, strength)
+            strengths.append(max_strength)
+            cedict_fields[field_idx] += 1
+        difficulty = sum(10*(1-s) for s in strengths)
+        # Find the most common field idx
+        field_idx = cedict_fields.index(max(cedict_fields))
+        yield sentence_nid, field_idx, fields, difficulty

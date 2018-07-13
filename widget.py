@@ -12,6 +12,8 @@ from .han import filter_text_hanzi, is_hanzi, split_hanzi
 from .cedict import load_cedict
 from collections import defaultdict
 
+from . import indexing
+
 
 class ConfigWidget(QWidget):
     def __init__(self):
@@ -666,11 +668,12 @@ class RememberberryWidget(ConfigWidget):
             self.prepare_search()
             self.redo_search = False
 
+        sentences = indexing.get_sentence_difficulties()
         if filter_text != '':
             sentence_filter = lambda s: filter_text in s[2][s[1]]
         else:
             sentence_filter = lambda s: self.curr_difficulty < s[-1] < self.max_difficulty
-        sentences = sorted([s for s in self.sentences if sentence_filter(s)],
+        sentences = sorted([s for s in sentences if sentence_filter(s)],
                            key=lambda x: x[-1])
         self.search_results = sentences[:self.max_num_results]
 
@@ -686,10 +689,22 @@ class RememberberryWidget(ConfigWidget):
 
         self.table_widget.setRowCount(len(self.search_results))
 
-        for i, (nid, field_idx, fields, words, difficulty) in enumerate(self.search_results):
+        for i, (snid, field_idx, fields, difficulty) in enumerate(self.search_results):
+            cedicts, _ = indexing.sentence_nid_to_cedicts[snid]
+
             colors = []
             sentence = fields[field_idx]
-            for _, start, end, strength in words:
+            word_ranges = []
+            for cedict_idx, hz_type, _, char_idx in cedicts:
+                word_len = len(indexing.cedict[cedict_idx][hz_type])
+                start, end = char_idx, char_idx + word_len
+                word_ranges.append((start, end))
+
+                max_strength = 0
+                for wnid, *_ in indexing.cedict_to_nids.get(cedict_idx, ([], []))[0]:
+                    strength = indexing.nid_to_strength[wnid]
+                    max_strength = max(max_strength, strength)
+
                 if strength < 0:
                     colors.append('white')
                 elif 0 <= strength < 0.2:
@@ -705,7 +720,7 @@ class RememberberryWidget(ConfigWidget):
 
             label = ''.join('<span style="background: %s; border-color: black">%s</span><span> </span>'
                             % (color, sentence[start:end])
-                            for color, (_, start, end, _) in zip(colors, words))
+                            for color, (start, end) in zip(colors, word_ranges))
 
             self.table_widget.setCellWidget(i, 0, QLabel(label))
             for j, k in enumerate([k for k in range(len(fields)) if k != field_idx]):
@@ -720,96 +735,12 @@ class RememberberryWidget(ConfigWidget):
     def prepare_search(self):
         self.read_config()
         decks = json.loads(mw.col.db.all("select decks from col")[0][0])
-        known_decks = self.config['known_vocabulary_decks']
-        active_decks = self.config['active_vocabulary_decks']
+        user_decks = self.config['active_vocabulary_decks']
         sentence_decks = self.config['sentence_decks']
-        user_decks = (list(zip(known_decks, [True]*len(known_decks))) +
-                      list(zip(active_decks, [False]*len(active_decks))))
-        vocab_strengths = defaultdict(list)
-        vocab_info = defaultdict(list)
-
-        def _iter_note_hanzi(deck_name, filter_marked=False):
-            did = self.get_did_from_name(deck_name, decks)
-            if did is None:
-                return
-            extra = 'and data=="" ' if filter_marked else ''
-            cards = mw.col.db.all("select nid, max(reps-lapses), data from cards where did=%s %sgroup by nid" % (did, extra))
-
-            ids_str = ', '.join(str(nid) for nid, _, _ in cards)
-            note_fields = mw.col.db.all("select id, flds from notes where id in (%s)" % ids_str)
-            note_fields = {nid: fields.split('\x1f') for nid, fields in note_fields}
-            for nid, reps_min_lapses, data in cards:
-                fields = note_fields[nid]
-                for i, field in enumerate(fields):
-                    if len(filter_text_hanzi(field)) == 0:
-                        continue
-                    yield nid, 10 if data == 'known' else reps_min_lapses, i, fields
-
-        for deck_name, is_known in user_decks:
-            for nid, reps_min_lapses, field_idx, fields in _iter_note_hanzi(deck_name):
-                splits = split_hanzi(fields[field_idx])
-
-                if len(splits) != 1:
-                    # add the sentence as well, so they're filtered out in the
-                    # sentence search
-                    splits.append(''.join(splits))
-                    splits.append(fields[field_idx])
-
-                for word in splits:
-                    vocab_strengths[word].append(1.0 if is_known else
-                                                 min((reps_min_lapses) / 10, 1.0))
-                    vocab_info[word].append((nid, fields[field_idx]))
-
-        for i, (trad, simpl, *_) in enumerate(self.cedict):
-            for w in [trad, simpl]:
-                vocab_info[w].append((-1, i))
-                vocab_strengths[w].append(0.0)
-
-
-        # Build a map from first character to full words
-        char_to_words = defaultdict(list)
-        for word in vocab_strengths.keys():
-            char_to_words[word[0]].append(word)
-        # Sort the word lists so we always check longest word first
-        for key, words in char_to_words.items():
-            char_to_words[key] = sorted(words, key=lambda x: len(x), reverse=True)
-
-        # Go through sentence decks, collect statistics
-        sentences = []
-        for deck_name in sentence_decks:
-            for nid, reps_min_lapses, field_idx, fields in _iter_note_hanzi(deck_name, True):
-                field = fields[field_idx]
-                words = []
-                curr_idx = 0
-                non_hanzi_start = -1
-                while curr_idx < len(field):
-                    curr_char = field[curr_idx]
-                    if curr_char not in char_to_words:
-                        if non_hanzi_start < 0:
-                            non_hanzi_start = curr_idx
-                        curr_idx += 1
-                        continue
-
-                    if non_hanzi_start >= 0:
-                        words.append(([], non_hanzi_start, curr_idx, -1.0))
-                        non_hanzi_start = -1
-
-                    for word in char_to_words[curr_char]:
-                        if field[curr_idx:curr_idx+len(word)] != word:
-                            continue
-                        if (len(word) == len(field) or
-                           len(filter_text_hanzi(word)) == len(filter_text_hanzi(field))):
-                            continue
-                        strength = min(1.0, sum(vocab_strengths[word]))
-                        words.append((vocab_info[word], curr_idx, curr_idx+len(word), strength))
-                        # -1 because it'll be incremented right after
-                        curr_idx += len(word) - 1
-                        break
-                    curr_idx += 1
-                difficulty = sum(10*(1-w[-1]) for w in words if w[-1] >= 0)
-                sentences.append((nid, field_idx, fields, words, difficulty))
-
-        self.sentences = sentences
+        if indexing.cedict is not None:
+            indexing.load_word_indexes(user_decks)
+        else:
+            indexing.load_indexes(user_decks, sentence_decks)
 
     def get_target_deck(self):
         return self.editor.parentWindow.deckChooser.selectedId()
