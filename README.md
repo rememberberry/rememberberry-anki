@@ -1,10 +1,13 @@
 For debugging in anki
 ```
+from aqt import mw
 import importlib
-from rememberberry import indexing
-importlib.reload(indexing)
-indexing.create_indexes(['all::chinese'], ['SpoonFedChinese'])
-indexing.save_indexes_to_file()
-indexing.load_indexes_from_file()
-print(list(indexing.get_sentence_difficulties())
+import rememberberry
+from rememberberry import db
+importlib.reload(db)
+from rememberberry.db import RememberberryDatabase
+rbd = RememberberryDatabase('rb.db')
+rbd.create(['all::chinese'], ['SpoonFedChinese'])
+
+rbd.update(['all::chinese'])
 ```

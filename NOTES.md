@@ -89,3 +89,14 @@ Initially, run an initial pass and set the sum_score by going through each user 
 go through all the links to that word and increment the user score of the corresponding sentence
 
 After that, whenever anki updates a card, go through links and apply the difference in strength
+
+
+----------
+2018-07-14
+----------
+
+import importlib
+from rememberberry import indexing
+importlib.reload(indexing)
+from indexing import RememberberryDatabase
+rbd = RememberberryDatabase('rb.db')
