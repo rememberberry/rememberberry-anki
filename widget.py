@@ -12,7 +12,7 @@ from .han import filter_text_hanzi, is_hanzi, split_hanzi
 from .cedict import load_cedict
 from collections import defaultdict
 
-from . import indexing
+from . import db
 
 
 class ConfigWidget(QWidget):

@@ -26,9 +26,6 @@ from aqt import mw
 
 from .han import filter_text_hanzi
 
-def _get_cursor():
-    return mw.col.db._db.cursor()
-
 
 def _executemany_select(c, statement, args):
     for a in args:
@@ -68,10 +65,14 @@ def _load_cedict(filename):
 
 
 class RememberberryDatabase:
-    def __init__(self, filename):
+    def __init__(self, filename, col=None):
         self.db_filename = filename
         self.decks = None
         self.models = None
+        self.col = col if col is not None else mw.col
+
+    def _get_cursor(self):
+        return self.col.db._db.cursor()
 
     def _get_did_from_name(self, deck_name):
         dids = [deck_id for (deck_id, deck_info) in self.decks.items()
@@ -87,7 +88,7 @@ class RememberberryDatabase:
         filter_str = '''
             AND NOT EXISTS
             (SELECT * FROM rb.note_links WHERE rb.note_links.nid == nid)'''
-        c = _get_cursor()
+        c = self._get_cursor()
         res = c.execute('''
            SELECT nid, max(reps-lapses), data FROM cards
            WHERE did=? %sGROUP BY nid
@@ -100,7 +101,7 @@ class RememberberryDatabase:
             yield (nid, mid, fields.split('\x1f'), *other[nid])
 
     def _get_field_from_name(self, mid, fields, valid_names):
-        for i, f in enumerate(mw.col.models.get(mid)['flds']):
+        for i, f in enumerate(self.col.models.get(mid)['flds']):
             if f['name'].lower() in valid_names:
                 return fields[i]
         return None
@@ -144,7 +145,7 @@ class RememberberryDatabase:
 
     def update(self, word_decks):
         self.attach()
-        c = _get_cursor()
+        c = self._get_cursor()
 
         # 1. Load user words and cross reference cedict and add note links
         # but only for cards that have not been inserted yet, or not updated
@@ -254,21 +255,21 @@ class RememberberryDatabase:
         self.detach()
 
     def attach(self):
-        c = _get_cursor()
-        mw.col.db._db.commit()
+        c = self._get_cursor()
+        self.col.db._db.commit()
         try:
             c.execute("ATTACH DATABASE ? AS rb", (self.db_filename,))
         except sqlite3.OperationalError:
             print("Database already attached, it's fine")
 
     def detach(self):
-        c = _get_cursor()
-        mw.col.db._db.commit()
+        c = self._get_cursor()
+        self.col.db._db.commit()
         c.execute("DETACH DATABASE rb")
 
     def init(self, word_decks, sentence_decks):
         self.attach()
-        c = _get_cursor()
+        c = self._get_cursor()
         self.decks = json.loads(c.execute("select decks from col").fetchall()[0][0])
         self.models = json.loads(c.execute("select models from col").fetchall()[0][0])
 
