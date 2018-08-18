@@ -16,7 +16,8 @@ To run tests
 ```
 import importlib
 import rememberberry
-from rememberberry import test_db
+from rememberberry import db, test_db
+importlib.reload(db)
 importlib.reload(test_db)
 test_db.run_tests()
 ```

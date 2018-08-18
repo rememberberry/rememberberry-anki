@@ -27,10 +27,15 @@ from aqt import mw
 from .han import filter_text_hanzi
 
 
-def _executemany_select(c, statement, args):
+def _executemany_select_one(c, statement, args):
     for a in args:
         c.execute(statement, a)
         yield c.fetchone()
+
+def _executemany_select_all(c, statement, args):
+    for a in args:
+        c.execute(statement, a)
+        yield c.fetchall()
 
 
 def _get_content_hash_and_str(json_content):
@@ -145,98 +150,82 @@ class RememberberryDatabase:
 
     def update(self, word_decks):
         self.attach()
+        try:
+            return self._update(word_decks)
+        finally:
+            self.detach()
+
+    def _update(self, word_decks):
         c = self._get_cursor()
 
         # 1. Load user words and cross reference cedict and add note links
         # but only for cards that have not been inserted yet, or not updated
         note_links = []
         for nid, *content, cedicts in self._iter_notes_cedicts(word_decks, True):
-            for cedict_idx, start, length in cedicts:
-                cedict_hash = self.cedict_hash_json[cedict_idx][0]
-                note_links.append((cedict_hash, nid))
+            if len(cedicts) != 1: continue
+            cedict_idx, start, length = cedicts[0]
+            cedict_hash = self.cedict_hash_json[cedict_idx][0]
+            note_links.append((cedict_hash, nid))
+        #print('Num note links: %i' % len(note_links))
 
         c.executemany('''
             INSERT OR IGNORE INTO rb.note_links VALUES (?, ?)
         ''', note_links)
 
-        c.execute('DROP TABLE IF EXISTS changed_tmp')
-        c.execute('DROP TABLE IF EXISTS new_tmp')
-
-        # 2. Update scores
+        # 2. Update sum_reps and sum_lapses in rb.items
         # 2.1. Find cards where a card's reps or lapses changed
-        c.execute('''
-            CREATE TEMPORARY TABLE changed_tmp AS
-                SELECT id, cards.nid, cards.reps, cards.lapses FROM cards
-                JOIN rb.last_updated ON cards.id=rb.last_updated.cid
-                WHERE (cards.reps != rb.last_updated.reps OR
-                       cards.lapses != rb.last_updated.lapses)
-        ''')
+        changed = [r[0] for r in c.execute('''
+            SELECT DISTINCT(cards.nid) FROM cards
+            JOIN rb.last_updated ON cards.id=rb.last_updated.cid
+            WHERE (cards.reps != rb.last_updated.reps OR
+                   cards.lapses != rb.last_updated.lapses)
+        ''').fetchall()]
 
         # 2.2. Find cards that are new (not yet present in rb.last_updated)
-        c.execute('''
-            CREATE TEMPORARY TABLE new_tmp AS
-                SELECT id, nid, cards.reps, cards.lapses FROM cards
-                WHERE cards.id NOT IN (SELECT cid FROM rb.last_updated)
-        ''')
+        new = [r[0] for r in c.execute('''
+            SELECT DISTINCT(nid) FROM cards
+            WHERE cards.id NOT IN (SELECT cid FROM rb.last_updated)
+        ''').fetchall()]
 
-        # 2.3. Update the rb.last_updated table with the changed and new values
-        # 2.3.1 Update the rb.last_updated table by first updating changes
-        c.execute('''
-            UPDATE rb.last_updated
-            SET reps=(SELECT reps FROM changed_tmp WHERE rb.last_updated.cid=changed_tmp.id),
-                lapses=(SELECT lapses FROM changed_tmp WHERE rb.last_updated.cid=changed_tmp.id)
-            WHERE EXISTS (SELECT * FROM changed_tmp WHERE rb.last_updated.cid=changed_tmp.id)
-        ''')
-
-        # 2.3.2 Then inserting new
-        c.execute('''
-            INSERT INTO rb.last_updated (cid, nid, reps, lapses)
-            SELECT id, nid, reps, lapses FROM changed_tmp
-        ''')
-
-        # 2.4. Find the sum of the reps and lapses in the new and changed groups of cards
-        changed = c.execute('''
-            SELECT nid, SUM(reps), SUM(lapses) FROM changed_tmp GROUP BY nid
-        ''').fetchall()
-        new = c.execute('''
-            SELECT nid, SUM(reps), SUM(lapses) FROM new_tmp GROUP BY nid
-        ''').fetchall()
-
-        # 2.5. Finally update the scores that have changed due to 'changed' and 'new'
-        # 2.5.1. Find items that should be updated via note_links
+        # 2.3. Finally update the scores that have changed
+        # 2.3.1. Find item hashes that should be updated via note_links
         updated_notes = changed+new
 
-        hashes = list(_executemany_select(c,
+        hashes = list(_executemany_select_one(c,
             'SELECT hash FROM rb.note_links WHERE nid=?',
-            [(nid,) for nid, _, _ in updated_notes]))
+            [(nid,) for nid in updated_notes]))
         hashes = [h[0] if isinstance(h, tuple) else h for h in hashes]
 
         # Filter out rows where there was no hash for the nid
         updated_hashes = [h for h in hashes if h is not None]
         updated_notes = [n for n, h in zip(updated_notes, hashes) if h is not None]
 
-        prev_reps_lapses = list(_executemany_select(c,
-            'SELECT SUM(reps), SUM(lapses) FROM cards WHERE nid=? GROUP BY nid',
-            [(nid,) for nid, _, _ in updated_notes]))
+        # 2.3.2. Find current and previous reps and calc the difference
+        curr_reps_lapses = list(_executemany_select_one(c,
+            'SELECT SUM(reps), SUM(lapses) FROM cards WHERE nid=?',
+            [(nid,) for nid in updated_notes]))
+        prev_reps_lapses = list(_executemany_select_one(c,
+            'SELECT SUM(reps), SUM(lapses) FROM rb.last_updated WHERE nid=?',
+            [(nid,) for nid in updated_notes]))
 
-        curr_reps_lapses = [(r, l) for _, r, l in updated_notes]
-        diff_reps_lapses = [(r1-r0, l1-l0) for ((r0, l0), (r1, l1))
+        diff_reps_lapses = [(r1-(r0 or 0), l1-(l0 or 0)) for ((r0, l0), (r1, l1))
                             in zip(prev_reps_lapses, curr_reps_lapses)]
-        updates = [(r, l, h) for h, (_, r, l) in zip(updated_hashes, updated_notes)]
+        updates = [(r, l, h) for h, (r, l) in zip(updated_hashes, curr_reps_lapses)]
+        
+        # 2.3.3. Update the items with changed notes
         c.executemany('UPDATE rb.items SET sum_reps=?, sum_lapses=? WHERE hash=?',
                       updates)
 
-        # 2.5.2. Find linked items (parents) via item_links
-        parent_hashes = list(_executemany_select(
+        # 2.3.4. Find linked items (parents) via item_links and update those
+        # incrementally
+        parent_hashes = list(_executemany_select_all(
             c, 'SELECT from_hash FROM rb.item_links WHERE to_hash=?',
             [(h,) for h in updated_hashes]))
 
-
-        # 2.5.3. Update the scores of the affected items
         parent_updates = []
         for (dr, dl), hs in zip(diff_reps_lapses, parent_hashes):
             if hs is None: continue
-            for h in hs: parent_hashes.append((dr, dl, h))
+            for h in hs: parent_updates.append((dr, dl, h[0]))
 
         c.executemany('''
             UPDATE rb.items
@@ -244,15 +233,26 @@ class RememberberryDatabase:
             WHERE hash=?
         ''', parent_updates)
 
-        print('Parent updates: ', parent_updates[:10])
+        # 2.4. Update the rb.last_updated table with the changed and new values
+        # 2.4.1 Update the rb.last_updated table by first updating changes
+        c.execute('''
+            UPDATE rb.last_updated
+            SET reps=(SELECT reps FROM cards WHERE rb.last_updated.cid=cards.id),
+                lapses=(SELECT lapses FROM cards WHERE rb.last_updated.cid=cards.id)
+            WHERE rb.last_updated.nid IN (%s)
+        ''' % ', '.join(str(c) for c in changed))
 
-        print('Changed: %i' % len(changed))
-        print('New: %i' % len(new))
+        # 2.4.2 Then inserting new
+        c.execute('''
+            INSERT INTO rb.last_updated (cid, nid, reps, lapses)
+            SELECT id, nid, reps, lapses FROM cards
+            WHERE nid IN (%s)
+        ''' % ', '.join(str(n) for n in new))
 
-        # Drop the temporary tables
-        c.execute('DROP TABLE changed_tmp')
-        c.execute('DROP TABLE new_tmp')
-        self.detach()
+        #print('Changed: %i' % len(changed))
+        #print('New: %i' % len(new))
+        #print('Parent updates: %i' % len(parent_updates))
+        return len(new), len(changed), len(parent_updates)
 
     def attach(self):
         c = self._get_cursor()
@@ -268,6 +268,13 @@ class RememberberryDatabase:
         c.execute("DETACH DATABASE rb")
 
     def init(self, word_decks, sentence_decks):
+        self.attach()
+        try:
+            self._init(word_decks, sentence_decks)
+        finally:
+            self.detach()
+
+    def _init(self, word_decks, sentence_decks):
         self.attach()
         c = self._get_cursor()
         self.decks = json.loads(c.execute("select decks from col").fetchall()[0][0])
@@ -301,12 +308,24 @@ class RememberberryDatabase:
             )
         ''')
         c.execute('''
+            CREATE INDEX rb.links_from_hashes ON item_links (from_hash);
+        ''')
+        c.execute('''
+            CREATE INDEX rb.links_to_hashes ON item_links (to_hash);
+        ''')
+        c.execute('''
             CREATE TABLE rb.note_links (
                 hash CHARACTER(8),
                 nid INTEGER,
                 PRIMARY KEY (hash, nid),
                 FOREIGN KEY(hash) REFERENCES items(hash)
             )
+        ''')
+        c.execute('''
+            CREATE INDEX rb.note_links_nids ON note_links (nid);
+        ''')
+        c.execute('''
+            CREATE INDEX rb.note_link_hashes ON note_links (hash);
         ''')
         c.execute('''
             CREATE TABLE rb.last_updated (
@@ -378,7 +397,7 @@ class RememberberryDatabase:
         c.executemany('''INSERT OR REPLACE INTO rb.item_links VALUES (?, ?, ?)''', links)
 
         # 4. Populate/update user words and the scores table
-        self.update(word_decks)
+        self._update(word_decks)
 
 
 def load_sentence_index(sentence_decks):
