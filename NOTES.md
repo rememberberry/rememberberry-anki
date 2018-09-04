@@ -100,3 +100,13 @@ from rememberberry import indexing
 importlib.reload(indexing)
 from indexing import RememberberryDatabase
 rbd = RememberberryDatabase('rb.db')
+
+----------
+2018-09-03
+----------
+It's clear that the summary statistics for sentences is not right.
+When a note is updated, first we need to find all note_links for that note.
+Then for each note in the links, we need to recalculate the reps,lapses for the whole item with the reps,lapses from the max score. Then for each parent item, need to
+add the difference
+
+Or use median instead of mean

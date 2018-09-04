@@ -4,6 +4,7 @@ from anki import Collection as aopen
 
 import rememberberry
 from rememberberry import db
+from time import time
 
 def run_tests():
     col_filename = os.path.join(os.path.dirname(__file__), 'test_collection.anki2')
@@ -11,9 +12,12 @@ def run_tests():
     shutil.copy(col_filename, tmp_filename)
     col = aopen(tmp_filename)
     rbd = db.RememberberryDatabase('rb.db', col)
+    t0 = time()
     rbd.init(['all::chinese'], ['SpoonFedChinese'])
+    t1 = time()
+    print('Initial update took %f s' % (t1-t0))
 
-    # Find an nid with an item which links to a sentence
+    # Find an nid with several items which links to it
     rbd.attach()
     c = rbd._get_cursor()
     c.execute('''
@@ -31,7 +35,14 @@ def run_tests():
     ''', (nid,))
 
     # Update the rememberberry database
+    t0 = time()
     new, changed, parents = rbd.update(['all::chinese'])
+    t1 = time()
+    print('Update took %f s' % (t1-t0))
+
+    # Make sure the item corresponding to the card was updated, and all sentences
     assert new == 0
     assert changed == 1
     assert parents == count
+    
+    #rbd.get_scores()
