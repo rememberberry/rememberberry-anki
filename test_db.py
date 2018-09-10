@@ -45,4 +45,5 @@ def run_tests():
     assert changed == 1
     assert parents == count
     
-    #rbd.get_scores()
+    scores = rbd.get_scores()
+    print(scores)

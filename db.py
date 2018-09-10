@@ -21,6 +21,7 @@ import re
 import json
 import hashlib
 import sqlite3
+import base64
 from functools import wraps
 
 from collections import defaultdict
@@ -44,8 +45,8 @@ def _get_content_hash_and_str(json_content):
     content = json.dumps(json_content)
     m = hashlib.sha256()
     m.update(content.encode('utf-8'))
-    h = m.digest()
-    return h[:8], content
+    h = base64.b64encode(m.digest())
+    return str(h[:16], 'utf-8'), content
 
 def _load_cedict(filename):
     cedict = []
@@ -193,18 +194,18 @@ class RememberberryDatabase:
 
         c.execute('''
             CREATE TABLE rb.items (
-                hash CHARACTER(8) PRIMARY KEY,
-                prev_hash CHARACTER(8),
+                hash CHARACTER(16) PRIMARY KEY,
+                prev_hash CHARACTER(16),
                 content VARCHAR,
                 type VARCHAR,
                 sum_reps_min_lapses INTEGER,
-                sum_links INTEGER
+                num_links INTEGER
             )
         ''')
         c.execute('''
             CREATE TABLE rb.item_links (
-                from_hash CHARACTER(8),
-                to_hash CHARACTER(8),
+                from_hash CHARACTER(16),
+                to_hash CHARACTER(16),
                 pointer VARCHAR,
                 PRIMARY KEY (from_hash, to_hash),
                 FOREIGN KEY(from_hash) REFERENCES items(hash),
@@ -219,7 +220,7 @@ class RememberberryDatabase:
         ''')
         c.execute('''
             CREATE TABLE rb.note_links (
-                hash CHARACTER(8),
+                hash CHARACTER(16),
                 nid INTEGER,
                 PRIMARY KEY (hash, nid),
                 FOREIGN KEY(hash) REFERENCES items(hash)
@@ -243,7 +244,7 @@ class RememberberryDatabase:
 
         c.execute('''
             CREATE TABLE rb.hsk (
-                hash CHARACTER(8),
+                hash CHARACTER(16),
                 level INTEGER,
                 PRIMARY KEY(hash),
                 FOREIGN KEY(hash) REFERENCES items(hash)
@@ -279,7 +280,7 @@ class RememberberryDatabase:
 
         # 2.4. Insert into items table with hash as id
         c.executemany('''INSERT OR REPLACE INTO rb.items VALUES (
-                         ?, NULL, ?, "cedict", NULL, NULL, NULL)''', self.cedict_hash_json)
+                         ?, NULL, ?, "cedict", 0, 0)''', self.cedict_hash_json)
 
         # 2.5. Insert into hsk table
         c.executemany('''INSERT OR REPLACE INTO rb.hsk VALUES (?, ?)''', self.cedict_hsk)
@@ -296,7 +297,7 @@ class RememberberryDatabase:
                 links.append((h_64, cedict_hash, link_pointer))
 
         c.executemany('''INSERT OR REPLACE INTO rb.items VALUES (
-                           ?, NULL, ?, ?, NULL, NULL, NULL
+                           ?, NULL, ?, ?, 0, 0
                          )''', sentences)
         c.executemany('''INSERT OR REPLACE INTO rb.item_links VALUES (?, ?, ?)''', links)
 
@@ -340,47 +341,48 @@ class RememberberryDatabase:
         # 2.3.1. Find item hashes that should be updated via note_links
         updated_notes = changed+new
 
-        hashes = list(_executemany_select_one(c,
-            'SELECT hash FROM rb.note_links WHERE nid=?',
-            [(nid,) for nid in updated_notes]))
-        hashes = [h[0] if isinstance(h, tuple) else h for h in hashes]
-
-        # Filter out rows where there was no hash for the nid
-        updated_hashes = [h for h in hashes if h is not None]
-        updated_notes = [n for n, h in zip(updated_notes, hashes) if h is not None]
-
-        # 2.3.2. Find current and previous reps and calc the difference
-        curr_reps_lapses = list(_executemany_select_one(c,
-            'SELECT AVG(reps - lapses) FROM cards WHERE nid=?',
-            [(nid,) for nid in updated_notes]))
-        prev_reps_lapses = list(_executemany_select_one(c,
-            'SELECT AVG(reps - lapses) FROM rb.last_updated WHERE nid=?',
-            [(nid,) for nid in updated_notes]))
-
-        diff_reps_lapses = [r1-(r0 or 0) for (r0, r1)
-                            in zip(prev_reps_lapses, curr_reps_lapses)]
-        updates = [zip(curr_reps_lapses, updated_hashes)]
+        updated_item_hashes = c.execute(
+            'SELECT DISTINCT(hash) FROM rb.note_links WHERE nid IN (%s)' % ','.join(str(n) for n in updated_notes)
+        ).fetchall()
+        updated_item_hashes = [h[0] for h in updated_item_hashes]
         
-        # 2.3.3. Update the items with changed notes
-        c.executemany('UPDATE rb.items SET sum_reps_min_lapses=?, WHERE hash=?',
-                      updates)
+        # 2.3.2. Update the items with changed notes
+        c.executemany('''
+            UPDATE rb.items SET sum_reps_min_lapses=
+            (
+                SELECT SUM(reps-lapses)
+                FROM rb.note_links JOIN cards ON rb.note_links.nid = cards.nid
+                WHERE rb.note_links.hash = ?
+            ), num_links= 
+            (
+                SELECT COUNT(*)
+                FROM rb.note_links JOIN cards ON rb.note_links.nid = cards.nid
+                WHERE rb.note_links.hash = ?
+            )
+            WHERE rb.items.hash = ?
+        ''', [(h, h, h) for h in updated_item_hashes])
 
-        # 2.3.4. Find linked items (parents) via item_links and update those
-        # incrementally
-        parent_hashes = list(_executemany_select_all(
-            c, 'SELECT from_hash FROM rb.item_links WHERE to_hash=?',
-            [(h,) for h in updated_hashes]))
-
-        parent_updates = []
-        for dr, hs in zip(diff_reps_lapses, parent_hashes):
-            if hs is None: continue
-            for h in hs: parent_updates.append((d, h[0]))
+        # 2.3.3. Find linked items (parents) via item_links and update those
+        # parents
+        parent_hashes = c.execute(
+            'SELECT DISTINCT(from_hash) FROM rb.item_links WHERE to_hash IN (%s)' %
+            ','.join('"%s"' % s for s in updated_item_hashes)).fetchall()
+        parent_hashes = [h[0] for h in parent_hashes]
 
         c.executemany('''
-            UPDATE rb.items
-            SET sum_reps_min_lapses=sum_reps_min_lapses+?
-            WHERE hash=?
-        ''', parent_updates)
+            UPDATE rb.items SET sum_reps_min_lapses=
+            (
+                SELECT SUM(sum_reps_min_lapses)
+                FROM rb.item_links JOIN rb.items ON rb.item_links.to_hash=rb.items.hash
+                WHERE rb.item_links.from_hash=?
+            ), num_links=
+            (
+                SELECT SUM(num_links)
+                FROM rb.item_links JOIN rb.items ON rb.item_links.to_hash=rb.items.hash
+                WHERE rb.item_links.from_hash=?
+            )
+            WHERE rb.items.hash=?
+        ''', [(h, h, h) for h in parent_hashes])
 
         # 2.4. Update the rb.last_updated table with the changed and new values
         # 2.4.1 Update the rb.last_updated table by first updating changes
@@ -398,19 +400,20 @@ class RememberberryDatabase:
             WHERE nid IN (%s)
         ''' % ', '.join(str(n) for n in new))
 
-        return len(new), len(changed), len(parent_updates)
+        return len(new), len(changed), len(parent_hashes)
 
     @attach_detach
-    def get_scores(score_range, num_unknown=-1):
+    def get_scores(self, score_range=None, num_unknown=-1):
         c = self._get_cursor()
 
         item_scores = c.execute('''
-            SELECT MIN(10, sum_reps_min_lapses)/10 FROM rb.items
+            SELECT CAST(sum_reps_min_lapses AS FLOAT)/num_links FROM rb.items
             WHERE rb.items.type = 'user_sentence' AND NOT EXISTS
             (SELECT * FROM rb.note_links WHERE rb.note_links.hash=rb.items.hash)
+            AND sum_reps_min_lapses > 0
+            LIMIT 100
         ''').fetchall()
-
-            #JOIN rb.note_links ON rb.note_links.id=rb.items.cid
+        return item_scores
 
 
 def load_sentence_index(sentence_decks):

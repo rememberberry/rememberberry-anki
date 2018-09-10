@@ -110,3 +110,11 @@ Then for each note in the links, we need to recalculate the reps,lapses for the 
 add the difference
 
 Or use median instead of mean
+
+----------
+2018-09-04
+----------
+Decided to just recalculate an item completely in a child changed, shouldn't be
+too slow. So if a note changed, then update all items that point to that note.
+For each item that was updated, update their parents as well, keep the sum of
+reps-lapses, and the total count so we can get the average
