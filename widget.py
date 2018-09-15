@@ -12,7 +12,7 @@ from .han import filter_text_hanzi, is_hanzi, split_hanzi
 from .cedict import load_cedict
 from collections import defaultdict
 
-from . import db
+from .db import RememberberryDatabase
 
 
 class ConfigWidget(QWidget):
@@ -136,7 +136,7 @@ class RememberberryWidget(ConfigWidget):
         self.editor = editor
         self.redo_search = True
         file_dir = os.path.dirname(__file__)
-        self.cedict = load_cedict(os.path.join(file_dir, 'corpus/sources/cedict_ts.u8'))
+        self.db = RememberberryDatabase(os.path.join(file_dir, 'user_files/db.sqlite'))
 
         def _close(orig_self, orig_close):
             self.close()
@@ -663,12 +663,15 @@ class RememberberryWidget(ConfigWidget):
 
     def search(self):
         filter_text = self.filter_box.text()
+        if filter_text == '':
+            filter_text = None
 
         if self.redo_search:
             self.prepare_search()
             self.redo_search = False
 
-        sentences = indexing.get_sentence_difficulties()
+        sentences = self.db.search(filter_text=filter_text, limit=self.max_num_results)
+        #sentences = indexing.get_sentence_difficulties()
         if filter_text != '':
             sentence_filter = lambda s: filter_text in s[2][s[1]]
         else:
@@ -737,10 +740,11 @@ class RememberberryWidget(ConfigWidget):
         decks = json.loads(mw.col.db.all("select decks from col")[0][0])
         user_decks = self.config['active_vocabulary_decks']
         sentence_decks = self.config['sentence_decks']
-        if indexing.cedict is not None:
-            indexing.load_word_indexes(user_decks)
+
+        if self.db.exists:
+            self.db.update(user_decks)
         else:
-            indexing.load_indexes(user_decks, sentence_decks)
+            self.db.init(user_decks, sentence_decks)
 
     def get_target_deck(self):
         return self.editor.parentWindow.deckChooser.selectedId()

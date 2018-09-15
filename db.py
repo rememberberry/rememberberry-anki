@@ -30,17 +30,6 @@ from aqt import mw
 from .han import filter_text_hanzi
 
 
-def _executemany_select_one(c, statement, args):
-    for a in args:
-        c.execute(statement, a)
-        yield c.fetchone()
-
-def _executemany_select_all(c, statement, args):
-    for a in args:
-        c.execute(statement, a)
-        yield c.fetchall()
-
-
 def _get_content_hash_and_str(json_content):
     content = json.dumps(json_content)
     m = hashlib.sha256()
@@ -90,6 +79,10 @@ class RememberberryDatabase:
         self.decks = None
         self.models = None
         self.col = col if col is not None else mw.col
+
+    @property
+    def exists(self):
+        return os.path.exists(self.db_filename)
 
     def _get_cursor(self):
         return self.col.db._db.cursor()
@@ -187,7 +180,7 @@ class RememberberryDatabase:
         self.models = json.loads(c.execute("select models from col").fetchall()[0][0])
 
         # 1. Create tables
-        tables = ['rb.items', 'rb.item_links', 'rb.note_links',
+        tables = ['rb.items', 'rb.item_links', 'rb.item_search', 'rb.note_links',
                   'rb.last_updated', 'rb.hsk']
         for table in tables:
             c.executescript('DROP TABLE IF EXISTS %s;' % table)
@@ -198,7 +191,12 @@ class RememberberryDatabase:
                 prev_hash CHARACTER(16),
                 content VARCHAR,
                 type VARCHAR,
-                sum_reps_min_lapses INTEGER,
+
+                max_correct INTEGER,
+                num_known INTEGER,
+                num_memorizing INTEGER,
+                num_learning INTEGER,
+                num_unknown INTEGER,
                 num_links INTEGER
             )
         ''')
@@ -212,11 +210,28 @@ class RememberberryDatabase:
                 FOREIGN KEY(to_hash) REFERENCES items(hash)
             )
         ''')
+        """
+        c.execute('''
+            CREATE TABLE rb.item_search (
+                hash CHARACTER(16),
+                max_correct INTEGER,
+                num_known INTEGER,
+                num_memorizing INTEGER,
+                num_learning INTEGER,
+                num_unknown INTEGER,
+                num_links INTEGER,
+                FOREIGN KEY(hash) REFERENCES items(hash)
+            )
+        ''')
+        """
         c.execute('''
             CREATE INDEX rb.links_from_hashes ON item_links (from_hash);
         ''')
         c.execute('''
             CREATE INDEX rb.links_to_hashes ON item_links (to_hash);
+        ''')
+        c.execute('''
+            CREATE INDEX rb.search_hashes ON items (hash);
         ''')
         c.execute('''
             CREATE TABLE rb.note_links (
@@ -280,7 +295,7 @@ class RememberberryDatabase:
 
         # 2.4. Insert into items table with hash as id
         c.executemany('''INSERT OR REPLACE INTO rb.items VALUES (
-                         ?, NULL, ?, "cedict", 0, 0)''', self.cedict_hash_json)
+                         ?, NULL, ?, "cedict", 0, 0, 0, 0, 0, 0)''', self.cedict_hash_json)
 
         # 2.5. Insert into hsk table
         c.executemany('''INSERT OR REPLACE INTO rb.hsk VALUES (?, ?)''', self.cedict_hsk)
@@ -297,7 +312,7 @@ class RememberberryDatabase:
                 links.append((h_64, cedict_hash, link_pointer))
 
         c.executemany('''INSERT OR REPLACE INTO rb.items VALUES (
-                           ?, NULL, ?, ?, 0, 0
+                           ?, NULL, ?, ?, 0, 0, 0, 0, 0, 0
                          )''', sentences)
         c.executemany('''INSERT OR REPLACE INTO rb.item_links VALUES (?, ?, ?)''', links)
 
@@ -348,19 +363,13 @@ class RememberberryDatabase:
         
         # 2.3.2. Update the items with changed notes
         c.executemany('''
-            UPDATE rb.items SET sum_reps_min_lapses=
-            (
-                SELECT SUM(reps-lapses)
-                FROM rb.note_links JOIN cards ON rb.note_links.nid = cards.nid
-                WHERE rb.note_links.hash = ?
-            ), num_links= 
-            (
-                SELECT COUNT(*)
+            UPDATE rb.items SET max_correct=(
+                SELECT MAX(reps-lapses)
                 FROM rb.note_links JOIN cards ON rb.note_links.nid = cards.nid
                 WHERE rb.note_links.hash = ?
             )
-            WHERE rb.items.hash = ?
-        ''', [(h, h, h) for h in updated_item_hashes])
+            WHERE hash = ?
+        ''', [2*(h,) for h in updated_item_hashes])
 
         # 2.3.3. Find linked items (parents) via item_links and update those
         # parents
@@ -369,20 +378,20 @@ class RememberberryDatabase:
             ','.join('"%s"' % s for s in updated_item_hashes)).fetchall()
         parent_hashes = [h[0] for h in parent_hashes]
 
-        c.executemany('''
-            UPDATE rb.items SET sum_reps_min_lapses=
-            (
-                SELECT SUM(sum_reps_min_lapses)
-                FROM rb.item_links JOIN rb.items ON rb.item_links.to_hash=rb.items.hash
-                WHERE rb.item_links.from_hash=?
-            ), num_links=
-            (
-                SELECT SUM(num_links)
-                FROM rb.item_links JOIN rb.items ON rb.item_links.to_hash=rb.items.hash
-                WHERE rb.item_links.from_hash=?
-            )
-            WHERE rb.items.hash=?
-        ''', [(h, h, h) for h in parent_hashes])
+        properties = [('num_known', 'AND max_correct > 8'),
+                      ('num_memorizing', 'AND max_correct BETWEEN 5 AND 8'),
+                      ('num_learning', 'AND max_correct BETWEEN 1 AND 4'),
+                      ('num_unknown', 'AND max_correct = 0'),
+                      ('num_links', '')]
+        for prop in properties:
+            c.executemany('''
+                UPDATE rb.items SET
+                    %s=(
+                        SELECT COUNT(*) FROM rb.item_links JOIN rb.items ON rb.items.hash=rb.item_links.to_hash
+                        WHERE from_hash=? %s
+                    )
+                WHERE hash = ?
+            ''' % prop, [2*(h,) for h in parent_hashes])
 
         # 2.4. Update the rb.last_updated table with the changed and new values
         # 2.4.1 Update the rb.last_updated table by first updating changes
@@ -403,14 +412,14 @@ class RememberberryDatabase:
         return len(new), len(changed), len(parent_hashes)
 
     @attach_detach
-    def get_scores(self, score_range=None, num_unknown=-1):
+    def search(self, limit=-1, num_unknown=-1):
         c = self._get_cursor()
 
         item_scores = c.execute('''
-            SELECT CAST(sum_reps_min_lapses AS FLOAT)/num_links FROM rb.items
+            SELECT * FROM rb.items
             WHERE rb.items.type = 'user_sentence' AND NOT EXISTS
             (SELECT * FROM rb.note_links WHERE rb.note_links.hash=rb.items.hash)
-            AND sum_reps_min_lapses > 0
+            AND num_unknown = 1
             LIMIT 100
         ''').fetchall()
         return item_scores
