@@ -27,8 +27,6 @@ from functools import wraps
 from collections import defaultdict
 from aqt import mw
 
-from .han import filter_text_hanzi
-
 
 def _get_content_hash_and_str(json_content):
     content = json.dumps(json_content)
@@ -37,16 +35,16 @@ def _get_content_hash_and_str(json_content):
     h = base64.b64encode(m.digest())
     return str(h[:16], 'utf-8'), content
 
-def _load_cedict(filename):
+def _load_cedict(filename, hsk=None):
     cedict = []
     with open(filename, 'r', encoding="utf-8") as f:
         for line in f:
             if line.startswith('#'):
                 continue
-            tr, sm, pi, trans = re.match(r"(\S*) (\S*) \[(.*)\] \/(.*)\/", line).groups()
-            trans = trans.split('/')
-            trans = [t for t in trans if not t.startswith('see also ')]
-            cedict.append((tr, sm, pi, trans))
+            tr, sm, py, transl = re.match(r"(\S*) (\S*) \[(.*)\] \/(.*)\/", line).groups()
+            transl = transl.split('/')
+            transl = [t for t in transl if not t.startswith('see also ')]
+            cedict.append((tr, sm, py, transl))
 
     # Build a map from first character to full words
     cedict_char_to_idx = defaultdict(list)
@@ -54,9 +52,20 @@ def _load_cedict(filename):
         cedict_char_to_idx[tr[0]].append((cedict_idx, 0))
         cedict_char_to_idx[sm[0]].append((cedict_idx, 1))
 
-    # Sort the word lists so we always check longest word first
+    # Sort the word lists first by length, then by hsk level
+    # so we always check longest word first, and with a preference for lowest hsk level
+    def sort_key(x):
+        hz = cedict[x[0]][1]
+        word_level = 9 # unknown
+        for lvl in range(1, 7):
+            if hsk is None: break
+            if hz in hsk[lvl]:
+                word_level = lvl
+                break
+        return '%02d-%02d' % (len(hz), 9-word_level)
+
     for key, words in cedict_char_to_idx.items():
-        cedict_char_to_idx[key] = sorted(words, key=lambda x: len(cedict[x[0]][0]), reverse=True)
+        cedict_char_to_idx[key] = sorted(words, key=sort_key, reverse=True)
 
     return cedict, cedict_char_to_idx
 
@@ -74,11 +83,12 @@ def attach_detach(method):
 
 
 class RememberberryDatabase:
-    def __init__(self, filename, col=None):
+    def __init__(self, filename, col=None, completed_hsk_lvl=0):
         self.db_filename = filename
         self.decks = None
         self.models = None
         self.col = col if col is not None else mw.col
+        self.completed_hsk_lvl = completed_hsk_lvl
 
     @property
     def exists(self):
@@ -210,20 +220,6 @@ class RememberberryDatabase:
                 FOREIGN KEY(to_hash) REFERENCES items(hash)
             )
         ''')
-        """
-        c.execute('''
-            CREATE TABLE rb.item_search (
-                hash CHARACTER(16),
-                max_correct INTEGER,
-                num_known INTEGER,
-                num_memorizing INTEGER,
-                num_learning INTEGER,
-                num_unknown INTEGER,
-                num_links INTEGER,
-                FOREIGN KEY(hash) REFERENCES items(hash)
-            )
-        ''')
-        """
         c.execute('''
             CREATE INDEX rb.links_from_hashes ON item_links (from_hash);
         ''')
@@ -267,31 +263,30 @@ class RememberberryDatabase:
         ''')
 
         # 2. Load cedict into items
-        # 2.1. Load the cedict file
+        # 2.1. Load HSK files
         sources_dir = os.path.join(os.path.dirname(__file__), 'corpus/sources')
-        cedict_file = os.path.join(sources_dir, 'cedict_ts.u8')
-        self.cedict, self.cedict_char_to_idx = _load_cedict(cedict_file)
-
-        # 2.2. Load HSK files
         hsk = {}
         for lvl in range(1, 7):
-            cedict_file = os.path.join(sources_dir, 'HSK%i.txt' % lvl)
-            lvl_words = set(open(cedict_file, 'r', encoding='utf-8').readlines())
+            hsk_file = os.path.join(sources_dir, 'HSK%i.txt' % lvl)
+            lvl_words = set(open(hsk_file, 'r', encoding='utf-8').read().splitlines())
             hsk[lvl] = lvl_words
+
+        # 2.2. Load the cedict file
+        cedict_file = os.path.join(sources_dir, 'cedict_ts.u8')
+        self.cedict, self.cedict_char_to_idx = _load_cedict(cedict_file, hsk)
 
         # 2.3. Create json content for each and hash it
         self.cedict_hash_json = []
         self.cedict_hsk = []
         for c_data in self.cedict:
             h_64, content = _get_content_hash_and_str(c_data)
-            self.cedict_hash_json.append((h_64, content))
-            word_level = 0
+            word_level = 9 # unknown
             for lvl in range(1, 7):
                 if c_data[1] in hsk[lvl]:
                     word_level = lvl
                     break
+            self.cedict_hash_json.append((h_64, content))
             self.cedict_hsk.append((h_64, word_level))
-
 
         # 2.4. Insert into items table with hash as id
         c.executemany('''INSERT OR REPLACE INTO rb.items VALUES (
@@ -303,7 +298,7 @@ class RememberberryDatabase:
         # 3. Load sentences into items and cross reference cedict and add item links
         links = []
         sentences = []
-        for nid, *content, cedicts in self._iter_notes_cedicts(sentence_decks):
+        for nid, *content, cedicts in self._iter_notes_cedicts(sentence_decks, hsk):
             h_64, content = _get_content_hash_and_str([None, *content])
             sentences.append((h_64, content, 'user_sentence'))
             for cedict_idx, start, length in cedicts:
@@ -378,16 +373,19 @@ class RememberberryDatabase:
             ','.join('"%s"' % s for s in updated_item_hashes)).fetchall()
         parent_hashes = [h[0] for h in parent_hashes]
 
-        properties = [('num_known', 'AND max_correct > 8'),
-                      ('num_memorizing', 'AND max_correct BETWEEN 5 AND 8'),
-                      ('num_learning', 'AND max_correct BETWEEN 1 AND 4'),
-                      ('num_unknown', 'AND max_correct = 0'),
+        l = self.completed_hsk_lvl
+        properties = [('num_known', 'AND (max_correct > 8 OR level <= %i)' % l),
+                      ('num_memorizing', 'AND (max_correct BETWEEN 5 AND 8 AND level > %i)' % l),
+                      ('num_learning', 'AND (max_correct BETWEEN 1 AND 4 AND level > %i)' % l),
+                      ('num_unknown', 'AND (max_correct = 0 AND level > %i)' % l),
                       ('num_links', '')]
         for prop in properties:
             c.executemany('''
                 UPDATE rb.items SET
                     %s=(
-                        SELECT COUNT(*) FROM rb.item_links JOIN rb.items ON rb.items.hash=rb.item_links.to_hash
+                        SELECT COUNT(*) FROM rb.item_links
+                        JOIN rb.items ON rb.items.hash=rb.item_links.to_hash
+                        JOIN rb.hsk ON rb.items.hash=rb.hsk.hash
                         WHERE from_hash=? %s
                     )
                 WHERE hash = ?
@@ -412,52 +410,36 @@ class RememberberryDatabase:
         return len(new), len(changed), len(parent_hashes)
 
     @attach_detach
-    def search(self, limit=-1, num_unknown=-1):
+    def search(self, filter_text=None, limit=-1, num_unknown=-1):
         c = self._get_cursor()
 
-        item_scores = c.execute('''
+        filter_clause = ''
+        if filter_text is not None:
+            filter_clause = 'AND content like "%%s%"' % filter_text
+
+        unknown_clause = ''
+        if num_unknown >= 0:
+            unknown_clause = 'AND num_unknown=%i' % num_unknown
+
+        limit_clause = ''
+        if limit >= 0:
+            limit_clause = 'LIMIT %i' % limit
+
+        items = c.execute('''
             SELECT * FROM rb.items
             WHERE rb.items.type = 'user_sentence' AND NOT EXISTS
             (SELECT * FROM rb.note_links WHERE rb.note_links.hash=rb.items.hash)
-            AND num_unknown = 1
-            LIMIT 100
-        ''').fetchall()
-        return item_scores
+            %s %s %s
+        ''' % (unknown_clause, filter_clause, limit_clause)).fetchall()
 
-
-def load_sentence_index(sentence_decks):
-    global cedict_to_sentence_nids, sentence_nid_to_cedicts
-    cedict_to_sentence_nids, sentence_nid_to_cedicts = _get_cedict_note_maps(sentence_decks)
-
-
-def load_word_index(word_decks):
-    global cedict_to_nids, nid_to_cedicts
-    cedict_to_nids, nid_to_cedicts = _get_cedict_note_maps(word_decks)
-
-
-def load_word_strengths(word_decks):
-    global nid_to_strength
-    for deck in word_decks:
-        for nid, *_, reps_min_lapses, data in self._iter_notes(deck):
-            reps_min_lapses = 10 if data == 'known' else reps_min_lapses
-            strength = min((reps_min_lapses) / 10, 1.0)
-            nid_to_strength[nid] = strength
-
-
-def get_sentence_difficulties():
-    for sentence_nid, (cedicts, fields) in sentence_nid_to_cedicts.items():
-        strengths = []
-        cedict_fields = len(fields)*[0]
-        for cedict_idx, _, field_idx, _ in cedicts:
-            max_strength = 0
-            words, _ = cedict_to_nids.get(cedict_idx, ([], []))
-            for nid, *_ in words:
-                strength = nid_to_strength[nid]
-                max_strength = max(max_strength, strength)
-            strengths.append(max_strength)
-            cedict_fields[field_idx] += 1
-        difficulty = sum(10*(1-s) for s in strengths)
-        # Find the most common field idx
-        field_idx = cedict_fields.index(max(cedict_fields))
-        yield sentence_nid, field_idx, fields, difficulty
-
+        item_words = []
+        for h, *_ in items:
+            words = c.execute('''
+                SELECT * FROM rb.item_links
+                JOIN rb.items ON rb.item_links.to_hash = rb.items.hash
+                JOIN rb.hsk ON rb.hsk.hash=rb.items.hash
+                WHERE rb.item_links.from_hash=?
+            ''', (h,)).fetchall()
+            item_words.append(words)
+            
+        return items, item_words

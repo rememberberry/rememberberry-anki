@@ -670,15 +670,8 @@ class RememberberryWidget(ConfigWidget):
             self.prepare_search()
             self.redo_search = False
 
-        sentences = self.db.search(filter_text=filter_text, limit=self.max_num_results)
-        #sentences = indexing.get_sentence_difficulties()
-        if filter_text != '':
-            sentence_filter = lambda s: filter_text in s[2][s[1]]
-        else:
-            sentence_filter = lambda s: self.curr_difficulty < s[-1] < self.max_difficulty
-        sentences = sorted([s for s in sentences if sentence_filter(s)],
-                           key=lambda x: x[-1])
-        self.search_results = sentences[:self.max_num_results]
+        self.search_results = self.db.search(
+            filter_text=filter_text, limit=self.max_num_results, num_unknown=1)
 
         if len(self.search_results) == 0:
             showInfo('No matches')

@@ -11,11 +11,11 @@ def run_tests():
     tmp_filename = os.path.join(os.path.dirname(__file__), 'tmp.anki2')
     shutil.copy(col_filename, tmp_filename)
     col = aopen(tmp_filename)
-    rbd = db.RememberberryDatabase('rb.db', col)
+    rbd = db.RememberberryDatabase('rb.db', col, completed_hsk_lvl=4)
     t0 = time()
     rbd.init(['all::chinese'], ['SpoonFedChinese'])
     t1 = time()
-    print('Initial update took %f s' % (t1-t0))
+    print('Initialization took %f s' % (t1-t0))
 
     # Find an nid with several items which links to it
     rbd.attach()
@@ -45,5 +45,7 @@ def run_tests():
     assert changed == 1
     assert parents == count
     
-    scores = rbd.get_scores()
-    print(scores)
+    items, item_words = rbd.search(limit=10, num_unknown=1)
+    for i in range(10):
+        print(items[i], item_words[i])
+        print('=================')
