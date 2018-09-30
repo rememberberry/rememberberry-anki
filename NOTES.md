@@ -118,3 +118,13 @@ Decided to just recalculate an item completely in a child changed, shouldn't be
 too slow. So if a note changed, then update all items that point to that note.
 For each item that was updated, update their parents as well, keep the sum of
 reps-lapses, and the total count so we can get the average
+
+----------
+2018-09-23
+----------
+Use jieba for segmentation? The search function can return compounds as well as their
+constituents. Have a few choices:
+1. Set up compounds as their own type of item, use a different statistic query
+   for them (minimum of all constituent max_correct)
+   Use jieba on cedict to find all compounds
+   Then use jieba without the search function on the sentences

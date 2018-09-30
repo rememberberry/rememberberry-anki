@@ -26,6 +26,10 @@ from functools import wraps
 
 from collections import defaultdict
 from aqt import mw
+from aqt.utils import showInfo
+
+from .han import filter_text_hanzi
+import jieba
 
 
 def _get_content_hash_and_str(json_content):
@@ -35,40 +39,33 @@ def _get_content_hash_and_str(json_content):
     h = base64.b64encode(m.digest())
     return str(h[:16], 'utf-8'), content
 
+
 def _load_cedict(filename, hsk=None):
-    cedict = []
+    cedict = defaultdict(list)
     with open(filename, 'r', encoding="utf-8") as f:
         for line in f:
             if line.startswith('#'):
                 continue
             tr, sm, py, transl = re.match(r"(\S*) (\S*) \[(.*)\] \/(.*)\/", line).groups()
+            # Skip names for now
+            #if py[0].isupper():
+                #continue
             transl = transl.split('/')
             transl = [t for t in transl if not t.startswith('see also ')]
-            cedict.append((tr, sm, py, transl))
+            cedict[sm].append((tr, py, transl))
 
-    # Build a map from first character to full words
-    cedict_char_to_idx = defaultdict(list)
-    for cedict_idx, (tr, sm, *_) in enumerate(cedict):
-        cedict_char_to_idx[tr[0]].append((cedict_idx, 0))
-        cedict_char_to_idx[sm[0]].append((cedict_idx, 1))
+    # Find compounds with jieba
+    num = 0
+    compound_parts = {}
+    for sm, entries in cedict.items():
+        # search mode will produce compounds and their parts
+        tokens = list(jieba.tokenize(sm, mode='search'))
+        parts = [t for t in tokens if t[2]-t[1] < len(sm)]
+        compound_parts[sm] = parts
 
-    # Sort the word lists first by length, then by hsk level
-    # so we always check longest word first, and with a preference for lowest hsk level
-    def sort_key(x):
-        hz = cedict[x[0]][1]
-        word_level = 9 # unknown
-        for lvl in range(1, 7):
-            if hsk is None: break
-            if hz in hsk[lvl]:
-                word_level = lvl
-                break
-        return '%02d-%02d' % (len(hz), 9-word_level)
-
-    for key, words in cedict_char_to_idx.items():
-        cedict_char_to_idx[key] = sorted(words, key=sort_key, reverse=True)
-
-    return cedict, cedict_char_to_idx
-
+    # Join multiple sound characters (多音字)
+    cedict = {sm: (sm, entries, compound_parts[sm]) for sm, entries in cedict.items()}
+    return cedict
 
 def attach_detach(method):
     @wraps(method)
@@ -89,6 +86,10 @@ class RememberberryDatabase:
         self.models = None
         self.col = col if col is not None else mw.col
         self.completed_hsk_lvl = completed_hsk_lvl
+
+        c = self._get_cursor()
+        self.decks = json.loads(c.execute("select decks from col").fetchall()[0][0])
+        self.models = json.loads(c.execute("select models from col").fetchall()[0][0])
 
     @property
     def exists(self):
@@ -149,21 +150,12 @@ class RememberberryDatabase:
                 if hanzi_field == None:
                     # As a fall back, find the field with the most hanzi characters
                     hanzi_field = self._find_hanzi_field(fields)
+
                 pinyin_field = self._get_field_from_name(mid, fields, pinyin_names)
                 english_field = self._get_field_from_name(mid, fields, english_names)
 
-                taken = len(hanzi_field)*[0]
-                cedicts = []
-                for char_idx, char in enumerate(hanzi_field):
-                    for cedict_idx, hz_type in self.cedict_char_to_idx[char]:
-                        hz = self.cedict[cedict_idx][hz_type]
-                        if hanzi_field[char_idx:char_idx+len(hz)] != hz:
-                            continue
-                        if sum(taken[char_idx:char_idx+len(hz)]) > 0:
-                            continue
-
-                        cedicts.append((cedict_idx, char_idx, len(hz)))
-                        taken[char_idx:char_idx+len(hz)] = len(hz)*[1]
+                tokens = list(jieba.tokenize(hanzi_field))
+                cedicts = [t for t in tokens if t[0] in self.cedict]
                 yield nid, hanzi_field, pinyin_field, english_field, cedicts
 
     def attach(self):
@@ -186,8 +178,6 @@ class RememberberryDatabase:
     def init(self, word_decks, sentence_decks):
         self.attach()
         c = self._get_cursor()
-        self.decks = json.loads(c.execute("select decks from col").fetchall()[0][0])
-        self.models = json.loads(c.execute("select models from col").fetchall()[0][0])
 
         # 1. Create tables
         tables = ['rb.items', 'rb.item_links', 'rb.item_search', 'rb.note_links',
@@ -256,7 +246,7 @@ class RememberberryDatabase:
         c.execute('''
             CREATE TABLE rb.hsk (
                 hash CHARACTER(16),
-                level INTEGER,
+                hsk_lvl INTEGER,
                 PRIMARY KEY(hash),
                 FOREIGN KEY(hash) REFERENCES items(hash)
             )
@@ -269,41 +259,59 @@ class RememberberryDatabase:
         for lvl in range(1, 7):
             hsk_file = os.path.join(sources_dir, 'HSK%i.txt' % lvl)
             lvl_words = set(open(hsk_file, 'r', encoding='utf-8').read().splitlines())
-            hsk[lvl] = lvl_words
+            # Split up words and add individual characters
+            chars = set()
+            for word in lvl_words:
+                chars = chars | set(word)
+            hsk[lvl] = lvl_words | chars
 
         # 2.2. Load the cedict file
         cedict_file = os.path.join(sources_dir, 'cedict_ts.u8')
-        self.cedict, self.cedict_char_to_idx = _load_cedict(cedict_file, hsk)
+        self.cedict = _load_cedict(cedict_file, hsk)
 
         # 2.3. Create json content for each and hash it
-        self.cedict_hash_json = []
+        self.cedict_hash_json = {}
         self.cedict_hsk = []
-        for c_data in self.cedict:
+        for hz, c_data in self.cedict.items():
+            c_data = c_data[:-1] # remove compounds
             h_64, content = _get_content_hash_and_str(c_data)
             word_level = 9 # unknown
             for lvl in range(1, 7):
-                if c_data[1] in hsk[lvl]:
+                if hz in hsk[lvl]:
                     word_level = lvl
                     break
-            self.cedict_hash_json.append((h_64, content))
+            self.cedict_hash_json[hz] = ((h_64, content))
             self.cedict_hsk.append((h_64, word_level))
 
         # 2.4. Insert into items table with hash as id
         c.executemany('''INSERT OR REPLACE INTO rb.items VALUES (
-                         ?, NULL, ?, "cedict", 0, 0, 0, 0, 0, 0)''', self.cedict_hash_json)
+                         ?, NULL, ?, "cedict", 0, 0, 0, 0, 0, 0)''',
+                      list(self.cedict_hash_json.values()))
 
         # 2.5. Insert into hsk table
         c.executemany('''INSERT OR REPLACE INTO rb.hsk VALUES (?, ?)''', self.cedict_hsk)
 
-        # 3. Load sentences into items and cross reference cedict and add item links
+        # 3. Add links
+
+        # 3.1. Add links between compound cedict words and their parts
         links = []
+        for sm, (*_, compound_parts) in self.cedict.items():
+            compound_hash = self.cedict_hash_json[sm][0]
+            for part_sm, start, end in compound_parts:
+                if part_sm not in self.cedict_hash_json:
+                    continue
+                part_hash = self.cedict_hash_json[part_sm][0]
+                link_pointer = '%i-%i' % (start, end)
+                links.append((compound_hash, part_hash, link_pointer))
+
+        # 3.2. Load sentences into items and cross reference cedict and add item links
         sentences = []
         for nid, *content, cedicts in self._iter_notes_cedicts(sentence_decks, hsk):
             h_64, content = _get_content_hash_and_str([None, *content])
             sentences.append((h_64, content, 'user_sentence'))
-            for cedict_idx, start, length in cedicts:
-                link_pointer = '%i-%i' % (start, start+length)
-                cedict_hash = self.cedict_hash_json[cedict_idx][0]
+            for hz, start, end in cedicts:
+                link_pointer = '%i-%i' % (start, end)
+                cedict_hash = self.cedict_hash_json[hz][0]
                 links.append((h_64, cedict_hash, link_pointer))
 
         c.executemany('''INSERT OR REPLACE INTO rb.items VALUES (
@@ -322,11 +330,10 @@ class RememberberryDatabase:
         # but only for cards that have not been inserted yet, or not updated
         note_links = []
         for nid, *content, cedicts in self._iter_notes_cedicts(word_decks, True):
-            if len(cedicts) != 1: continue
-            cedict_idx, start, length = cedicts[0]
-            cedict_hash = self.cedict_hash_json[cedict_idx][0]
-            note_links.append((cedict_hash, nid))
-        #print('Num note links: %i' % len(note_links))
+            ## Only link single words
+            for hz, start, length in cedicts:
+                cedict_hash = self.cedict_hash_json[hz][0]
+                note_links.append((cedict_hash, nid))
 
         c.executemany('''
             INSERT OR IGNORE INTO rb.note_links VALUES (?, ?)
@@ -352,7 +359,8 @@ class RememberberryDatabase:
         updated_notes = changed+new
 
         updated_item_hashes = c.execute(
-            'SELECT DISTINCT(hash) FROM rb.note_links WHERE nid IN (%s)' % ','.join(str(n) for n in updated_notes)
+            'SELECT DISTINCT(hash) FROM rb.note_links WHERE nid IN (%s)'
+            % ','.join(str(n) for n in updated_notes)
         ).fetchall()
         updated_item_hashes = [h[0] for h in updated_item_hashes]
         
@@ -374,10 +382,10 @@ class RememberberryDatabase:
         parent_hashes = [h[0] for h in parent_hashes]
 
         l = self.completed_hsk_lvl
-        properties = [('num_known', 'AND (max_correct > 8 OR level <= %i)' % l),
-                      ('num_memorizing', 'AND (max_correct BETWEEN 5 AND 8 AND level > %i)' % l),
-                      ('num_learning', 'AND (max_correct BETWEEN 1 AND 4 AND level > %i)' % l),
-                      ('num_unknown', 'AND (max_correct = 0 AND level > %i)' % l),
+        properties = [('num_known', 'AND (max_correct > 8 OR hsk_lvl <= %i)' % l),
+                      ('num_memorizing', 'AND (max_correct BETWEEN 5 AND 8 AND hsk_lvl > %i)' % l),
+                      ('num_learning', 'AND (max_correct BETWEEN 1 AND 4 AND hsk_lvl > %i)' % l),
+                      ('num_unknown', 'AND (max_correct = 0 AND hsk_lvl > %i)' % l),
                       ('num_links', '')]
         for prop in properties:
             c.executemany('''
@@ -415,7 +423,7 @@ class RememberberryDatabase:
 
         filter_clause = ''
         if filter_text is not None:
-            filter_clause = 'AND content like "%%s%"' % filter_text
+            filter_clause = 'AND content like "%{}%"'.format(filter_text)
 
         unknown_clause = ''
         if num_unknown >= 0:
@@ -426,20 +434,27 @@ class RememberberryDatabase:
             limit_clause = 'LIMIT %i' % limit
 
         items = c.execute('''
-            SELECT * FROM rb.items
+            SELECT hash, content FROM rb.items
             WHERE rb.items.type = 'user_sentence' AND NOT EXISTS
             (SELECT * FROM rb.note_links WHERE rb.note_links.hash=rb.items.hash)
             %s %s %s
         ''' % (unknown_clause, filter_clause, limit_clause)).fetchall()
 
+        items = [(h, json.loads(c)) for h, c in items]
+
         item_words = []
         for h, *_ in items:
             words = c.execute('''
-                SELECT * FROM rb.item_links
+                SELECT rb.items.hash, content, pointer, max_correct, hsk_lvl
+                FROM rb.item_links
                 JOIN rb.items ON rb.item_links.to_hash = rb.items.hash
                 JOIN rb.hsk ON rb.hsk.hash=rb.items.hash
                 WHERE rb.item_links.from_hash=?
             ''', (h,)).fetchall()
+
+            # Conver the pointer to int tuple
+            words = [(h, json.loads(c), [int(p) for p in ptr.split('-')], *r)
+                     for (h, c, ptr, *r) in words]
             item_words.append(words)
             
-        return items, item_words
+        return list(zip(items, item_words))

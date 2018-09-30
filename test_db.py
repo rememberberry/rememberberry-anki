@@ -45,7 +45,10 @@ def run_tests():
     assert changed == 1
     assert parents == count
     
-    items, item_words = rbd.search(limit=10, num_unknown=1)
+    results = rbd.search(limit=10, num_unknown=1)
     for i in range(10):
-        print(items[i], item_words[i])
+        print(results[i][0])
+        print('------------')
+        for w in results[i][1]:
+            print(w)
         print('=================')

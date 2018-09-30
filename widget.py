@@ -132,7 +132,7 @@ class RememberberryWidget(ConfigWidget):
         self.min_difficulty = 0
         self.max_difficulty = 30
         self.curr_difficulty = 10
-        self.num_columns = 4
+        self.num_columns = 2
         self.editor = editor
         self.redo_search = True
         file_dir = os.path.dirname(__file__)
@@ -679,51 +679,42 @@ class RememberberryWidget(ConfigWidget):
             return
 
         self.table_widget.clear()
-        for i in range(self.num_columns):
-            self.table_widget.setHorizontalHeaderItem(i, QTableWidgetItem('Field %s' % (i+1)));
+        for i, name in enumerate(['Chinese', 'Translation']):
+            self.table_widget.setHorizontalHeaderItem(i, QTableWidgetItem(name))
             self.table_widget.setColumnWidth(i, 300)
 
         self.table_widget.setRowCount(len(self.search_results))
 
-        for i, (snid, field_idx, fields, difficulty) in enumerate(self.search_results):
-            cedicts, _ = indexing.sentence_nid_to_cedicts[snid]
-
+        for i, ((item_hash, item_content), words) in enumerate(self.search_results):
             colors = []
-            sentence = fields[field_idx]
+            sentence_hz, sentence_py, sentence_transl = item_content[1:]
             word_ranges = []
-            for cedict_idx, hz_type, _, char_idx in cedicts:
-                word_len = len(indexing.cedict[cedict_idx][hz_type])
-                start, end = char_idx, char_idx + word_len
+            for word_hash, word_content, (start, end), max_correct, hsk_lvl in words:
                 word_ranges.append((start, end))
 
-                max_strength = 0
-                for wnid, *_ in indexing.cedict_to_nids.get(cedict_idx, ([], []))[0]:
-                    strength = indexing.nid_to_strength[wnid]
-                    max_strength = max(max_strength, strength)
+                l = self.db.completed_hsk_lvl
+                is_known = max_correct > 8 or hsk_lvl <= l
+                is_memorizing = (5 <= max_correct <= 8) and hsk_lvl > l
+                is_learning = (1 <= max_correct <= 4) and hsk_lvl > l
+                is_unknown = max_correct == 0 and hsk_lvl > l
 
-                if strength < 0:
-                    colors.append('white')
-                elif 0 <= strength < 0.2:
+                if is_unknown:
                     colors.append('rgb(239, 75, 67)') # red
-                elif 0.2 <= strength < 0.4:
-                    colors.append('rgb(255, 255, 112)') # yellow
-                elif 0.4 <= strength < 0.6:
-                    colors.append('rgb(229, 229, 229)') # gray
-                elif 0.6 <= strength < 0.8:
+                elif is_learning:
+                    colors.append('orange') # orange
+                elif is_memorizing:
+                    #colors.append('rgb(255, 255, 112)') # yellow
                     colors.append('rgb(165, 224, 172)') # light green
-                elif 0.8 <= strength <= 1:
+                elif is_known:
                     colors.append('rgb(74, 155, 62)') # green
 
+            #showInfo(str(word_ranges) + ' ' + str(colors))
             label = ''.join('<span style="background: %s; border-color: black">%s</span><span> </span>'
-                            % (color, sentence[start:end])
+                            % (color, sentence_hz[start:end])
                             for color, (start, end) in zip(colors, word_ranges))
 
-            self.table_widget.setCellWidget(i, 0, QLabel(label))
-            for j, k in enumerate([k for k in range(len(fields)) if k != field_idx]):
-                self.table_widget.setCellWidget(i, j+1, QLabel(fields[k]))
-                if j >= self.num_columns-1:
-                    break
-            self.table_widget.setCellWidget(i, self.num_columns-1, QLabel(str(difficulty)))
+            self.table_widget.setCellWidget(i, 0, QLabel('%s <br> %s' % (label, sentence_py)))
+            self.table_widget.setCellWidget(i, 1, QLabel(sentence_transl))
         self.table_widget.resizeRowsToContents()
         self.table_widget.resizeColumnsToContents()
         self.table_widget.show()
