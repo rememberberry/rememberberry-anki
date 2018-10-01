@@ -685,11 +685,11 @@ class RememberberryWidget(ConfigWidget):
 
         self.table_widget.setRowCount(len(self.search_results))
 
-        for i, ((item_hash, item_content), words) in enumerate(self.search_results):
+        for i, ((item_hash, *item_content), words) in enumerate(self.search_results):
             colors = []
-            sentence_hz, sentence_py, sentence_transl = item_content[1:]
+            sentence_hz, sentence_py, sentence_transl = item_content
             word_ranges = []
-            for word_hash, word_content, (start, end), max_correct, hsk_lvl in words:
+            for word_hash, (start, end), max_correct, hsk_lvl in words:
                 word_ranges.append((start, end))
 
                 l = self.db.completed_hsk_lvl
