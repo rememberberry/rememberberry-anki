@@ -50,7 +50,8 @@ def _load_cedict(filename, hsk=None):
                 continue
             tr, sm, py, transl = re.match(r"(\S*) (\S*) \[(.*)\] \/(.*)\/", line).groups()
             transl = transl.split('/')
-            transl = [t for t in transl if not t.startswith('see also ')]
+            transl = '/'.join([t for t in transl if not t.startswith('see also ')
+                               and not t.startswith('variant of')])
             cedict[sm].append((tr, py, transl))
 
     # Find compounds with jieba
@@ -180,8 +181,23 @@ class RememberberryDatabase:
                 english_field = self._get_field_from_name(mid, fields, english_names)
 
                 tokens = list(jieba.tokenize(hanzi_field))
-                cedicts = [t for t in tokens if t[0] in self.cedict]
-                yield nid, hanzi_field, pinyin_field, english_field, cedicts
+
+                # tokens can contain compounds which are not in cedict
+                # if that is the case, then break it down into its parts and
+                # add them separately (if in cedict)
+                cedict_tokens = []
+                for t in tokens:
+                    if t[0] in self.cedict:
+                        cedict_tokens.append(t)
+                        continue
+
+                    parts = list(jieba.tokenize(t[0], mode='search'))
+                    for tc in parts:
+                        if tc[0] in self.cedict:
+                            # Correct the indices for the sentence
+                            cedict_tokens.append((tc[0], t[1]+tc[1], t[2]+tc[2]))
+
+                yield nid, hanzi_field, pinyin_field, english_field, cedict_tokens
 
     def attach(self):
         c = self._get_cursor()
@@ -345,7 +361,6 @@ class RememberberryDatabase:
         # but only for cards that have not been inserted yet, or not updated
         note_links = []
         for nid, *content, cedicts in self._iter_notes_cedicts(word_decks, True):
-            ## Only link single words
             for hz, start, length in cedicts:
                 cedict_hash = self.cedict_hash_json[hz][0]
                 note_links.append((cedict_hash, nid))
@@ -458,7 +473,7 @@ class RememberberryDatabase:
         item_words = []
         for h, *_ in items:
             words = c.execute('''
-                SELECT rb.items.hash, pointer, max_correct, hsk_lvl
+                SELECT rb.items.hash, pointer, max_correct, hsk_lvl, data_pinyin, data_translation
                 FROM rb.item_links
                 JOIN rb.items ON rb.item_links.to_hash = rb.items.hash
                 JOIN rb.hsk ON rb.hsk.hash=rb.items.hash
@@ -471,3 +486,10 @@ class RememberberryDatabase:
             item_words.append(words)
             
         return list(zip(items, item_words))
+
+    @attach_detach
+    def add_note_link(self, item_hash, nid):
+        c = self._get_cursor()
+        c.execute('''
+            INSERT OR IGNORE INTO rb.note_links VALUES (?, ?)
+        ''', (item_hash, nid))

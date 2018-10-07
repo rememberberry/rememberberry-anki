@@ -544,21 +544,20 @@ class RememberberryWidget(ConfigWidget):
                     yield flds[field_names.index(field_name)]
                     break
 
-    def select_cloze_words_dialog(self, words, fields, field_idx):
+    def select_cloze_words_dialog(self, words, hz, py, transl):
         dialog = QDialog()
         dialog.layout = QVBoxLayout(self)
 
-        note = QLabel('Note:\n' + '\n'.join(fields))
+        note = QLabel('Note:\n' + '\n'.join([hz, py, transl]))
         dialog.layout.addWidget(note, 0)
 
         model = QStandardItemModel()
         items = []
         word_indices = []
-        for i, (info, start, end, strength) in enumerate(words):
-            if strength < 0:
-                continue
-            item = QStandardItem(fields[field_idx][start:end])
-            item.setCheckState(Qt.Checked if 0 <= strength < 1 else Qt.Unchecked)
+        for i, (h, (start, end), max_correct, hsk_lvl, py, _) in enumerate(words):
+            item = QStandardItem('%s (%s)' % (hz[start:end], py))
+            is_known = max_correct > 8 or hsk_lvl <= self.db.completed_hsk_lvl
+            item.setCheckState(Qt.Checked if not is_known else Qt.Unchecked)
             item.setCheckable(True)
             model.appendRow(item)
             items.append(item)
@@ -570,8 +569,7 @@ class RememberberryWidget(ConfigWidget):
         cancelled = True
         is_joint = False
         def _add(joint):
-            nonlocal cancelled
-            nonlocal is_joint
+            nonlocal cancelled, is_joint
             is_joint = joint
             cancelled = False
             dialog.close()
@@ -610,12 +608,13 @@ class RememberberryWidget(ConfigWidget):
         added = 0
         remove = []
         for row in self.table_widget.selectionModel().selectedRows():
-            nid, field_idx, fields, words, _ = self.search_results[row.row()]
-            field = fields[field_idx]
+            (item_hash, *item_content), words = self.search_results[row.row()]
+            sentence_hz, sentence_py, sentence_transl = item_content
 
             # Sort by start index
-            words = sorted(words, key=lambda w: w[1])
-            selected_words, joint = self.select_cloze_words_dialog(words, fields, field_idx)
+            words = sorted(words, key=lambda w: w[1][0])
+            selected_words, joint = self.select_cloze_words_dialog(
+                    words, sentence_hz, sentence_py, sentence_transl)
             if selected_words is None:
                 continue
 
@@ -623,21 +622,21 @@ class RememberberryWidget(ConfigWidget):
             cloze = ''
             cloze_words = ''
             next_close_idx = 1
-            for i, (info, start, end, strength) in enumerate(words):
+            for i, (h, (start, end), max_correct, hsk_lvl, py, tr) in enumerate(words):
+                tr = json.loads(tr)
                 if i not in selected_words:
-                    cloze += field[start:end]
+                    cloze += sentence_hz[start:end]
                 elif start > curr_idx:
-                    cloze += field[curr_idx:start]
+                    cloze += sentence_hz[curr_idx:start]
                 else:
-                    translations = self.get_translations(field[start:end], info)
                     cloze += '{{c%i::%s::%s}}' % (next_close_idx,
-                                                  field[start:end],
-                                                  list(translations)[0])
+                                                  sentence_hz[start:end],
+                                                  '/'.join(tr))
                     if not joint:
                         next_close_idx += 1
                 curr_idx = end
-            if curr_idx < len(field):
-                cloze += field[curr_idx:]
+            if curr_idx < len(sentence_hz):
+                cloze += sentence_hz[curr_idx:]
 
             cloze_model = mw.col.models.byName("Cloze")
             cloze_model['did'] = target_did
@@ -645,10 +644,9 @@ class RememberberryWidget(ConfigWidget):
             mw.col.models.setCurrent(cloze_model)
             f = mw.col.newNote(forDeck=False)
             f['Text'] = cloze
-            f['Extra'] = '<br/>'.join([f for i, f in enumerate(fields) if i != field_idx])
+            f['Extra'] = '%s<br/>%s' % (sentence_transl, sentence_py)
             mw.col.addNote(f)
-
-            mw.col.db.execute('update cards set data="added" where nid=?', nid)
+            self.db.add_note_link(item_hash, f.id)
 
             added += 1 if joint else next_close_idx - 1
             remove.append(row.row())
@@ -671,7 +669,7 @@ class RememberberryWidget(ConfigWidget):
             self.redo_search = False
 
         self.search_results = self.db.search(
-            filter_text=filter_text, limit=self.max_num_results, num_unknown=1)
+            filter_text=filter_text, limit=self.max_num_results, num_unknown=-1)
 
         if len(self.search_results) == 0:
             showInfo('No matches')
@@ -688,8 +686,12 @@ class RememberberryWidget(ConfigWidget):
         for i, ((item_hash, *item_content), words) in enumerate(self.search_results):
             colors = []
             sentence_hz, sentence_py, sentence_transl = item_content
+            #debug = sentence_transl == 'I know how to do it.'
+            #if debug:
+                #showInfo(sentence_hz)
+                #showInfo(str(words))
             word_ranges = []
-            for word_hash, (start, end), max_correct, hsk_lvl in words:
+            for word_hash, (start, end), max_correct, hsk_lvl, *_ in words:
                 word_ranges.append((start, end))
 
                 l = self.db.completed_hsk_lvl
@@ -703,12 +705,10 @@ class RememberberryWidget(ConfigWidget):
                 elif is_learning:
                     colors.append('orange') # orange
                 elif is_memorizing:
-                    #colors.append('rgb(255, 255, 112)') # yellow
                     colors.append('rgb(165, 224, 172)') # light green
                 elif is_known:
                     colors.append('rgb(74, 155, 62)') # green
 
-            #showInfo(str(word_ranges) + ' ' + str(colors))
             label = ''.join('<span style="background: %s; border-color: black">%s</span><span> </span>'
                             % (color, sentence_hz[start:end])
                             for color, (start, end) in zip(colors, word_ranges))
