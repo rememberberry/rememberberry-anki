@@ -7,6 +7,7 @@ from aqt.utils import showInfo
 from aqt.qt import *
 from anki.utils import ids2str, fieldChecksum, stripHTML, \
     intTime, splitFields, joinFields, maxID, json, devMode
+from anki.lang import _
 
 from .han import filter_text_hanzi, is_hanzi, split_hanzi
 from .cedict import load_cedict
@@ -14,6 +15,41 @@ from collections import defaultdict
 
 from .db import RememberberryDatabase
 
+def addChineseModel():
+    model_name = "Rememberberry Chinese"
+    if mw.col.models.byName(model_name) != None:
+        #showInfo('Already have model')
+        return
+    #showInfo('Adding model')
+    mm = mw.col.models
+    m = mm.new(_(model_name))
+    fm = mm.newField(_("Hanzi"))
+    mm.addField(m, fm)
+    fm = mm.newField(_("Pinyin"))
+    mm.addField(m, fm)
+    fm = mm.newField(_("Translation"))
+    mm.addField(m, fm)
+
+    t1 = mm.newTemplate(_("Translation -> Chinese"))
+    t1['qfmt'] = "{{"+_("Translation")+"}}"
+    t1['afmt'] = ("{{Translation}}\n\n<hr id=answer>\n\n"+"{{"+_("Hanzi")+"}}"
+                  +"\n\n{{"+_("Pinyin")+"}}")
+
+    t2 = mm.newTemplate(_("Hanzi -> Pinyin"))
+    t2['qfmt'] = "{{"+_("Hanzi")+"}}"
+    t2['afmt'] = ("{{Hanzi}}\n\n<hr id=answer>\n\n"+"{{"+_("Pinyin")+"}}"
+                  +"\n\n{{"+_("Translation")+"}}")
+
+    t3 = mm.newTemplate(_("Pinyin -> Translation"))
+    t3['qfmt'] = "{{"+_("Hanzi")+"}}"
+    t3['afmt'] = ("{{Hanzi}}\n\n<hr id=answer>\n\n"+"{{"+_("Pinyin")+"}}"
+                  +"\n\n{{"+_("Translation")+"}}")
+
+    mm.addTemplate(m, t1)
+    mm.addTemplate(m, t2)
+    mm.addTemplate(m, t3)
+    mm.add(m)
+    return m
 
 class ConfigWidget(QWidget):
     def __init__(self):
@@ -137,6 +173,9 @@ class RememberberryWidget(ConfigWidget):
         self.redo_search = True
         file_dir = os.path.dirname(__file__)
         self.db = RememberberryDatabase(os.path.join(file_dir, 'user_files/db.sqlite'))
+
+        # Try to add the chinese models if they don't exist
+        addChineseModel()
 
         def _close(orig_self, orig_close):
             self.close()
@@ -373,26 +412,54 @@ class RememberberryWidget(ConfigWidget):
         self.filter_box.setFixedWidth(300)
 
     def add(self):
+        if len(self.table_widget.selectionModel().selectedRows()) == 0:
+            showInfo("No sentences selected")
+            return
+
         target_did = self.decks[self.target_deck.currentText()]
+        model = mw.col.models.byName("Rememberberry Chinese")
+        model['did'] = target_did
+        mw.col.models.save(model)
+        mw.col.models.setCurrent(model)
+        added = 0
+        remove = []
+        for row in self.table_widget.selectionModel().selectedRows():
+            (item_hash, *item_content), words = self.search_results[row.row()]
+            sentence_hz, sentence_py, sentence_transl = item_content
 
-        note_ids = [self.search_results[row.row()][0]
-                    for row in self.table_widget.selectionModel().selectedRows()]
+            # Sort by start index
+            words = sorted(words, key=lambda w: w[1][0])
+            selected_words, joint = self.select_words_dialog(
+                    words, sentence_hz, sentence_py, sentence_transl, False)
 
-        note_ids_str = ', '.join([str(n) for n in note_ids])
-        cards = mw.col.db.all('select * from cards where nid in (%s)' % note_ids_str)
-        for card in cards:
-            # Create a new card id
-            new_card = (maxID(mw.col.db), card[1], target_did, *card[3:])
+            for i, (h, (start, end), max_correct, hsk_lvl, py, tr) in enumerate(words):
+                if i not in selected_words:
+                    continue
+                tr = json.loads(tr)[0]
+                py = json.loads(py)[0]
+                # Add word note
+                n = mw.col.newNote(forDeck=False)
+                n['Hanzi'] = sentence_hz[start:end]
+                n['Translation'] = tr
+                n['Pinyin'] = py
+                mw.col.addNote(n)
+                self.db.add_note_link(h, n.id)
+                added += 1
 
-            templ_str = ','.join(['?']*len(new_card))
-            insert_query = 'insert into cards values (%s)' % templ_str
-            mw.col.db.execute(insert_query, *new_card)
+            n = mw.col.newNote(forDeck=False)
+            n['Hanzi'] = sentence_hz
+            n['Translation'] = sentence_transl
+            n['Pinyin'] = sentence_py
+            mw.col.addNote(n)
+            self.db.add_note_link(item_hash, n.id)
+            added += 1
+            remove.append(row.row())
 
-        for nid in note_ids:
-            mw.col.db.execute('update cards set data="added" where nid=?', nid)
+        self.remove_table_rows(remove)
 
-        self.remove_table_rows(row.row() for row in self.table_widget.selectionModel().selectedRows())
-        showInfo('Added %i cards from %s notes' % (len(cards), len(note_ids)))
+        if added > 0:
+            showInfo('Added %i note%s' % (added, 's' if added > 1 else ''))
+
 
     def mark_sentences(self):
         selected_rows = self.table_widget.selectionModel().selectedRows()
@@ -524,27 +591,7 @@ class RememberberryWidget(ConfigWidget):
         dialog.exec_()
         return cancelled
 
-    def get_translations(self, word, info):
-        # info is list of notes (nid, field) that matched a word in a sentence
-        valid_field_names = ['English', 'english', 'en', 'En', 'eng']
-        for nid, sentence in info:
-            if nid == -1:
-                yield self.cedict[sentence][-1] # cedict translation
-                continue
-
-            if len(sentence) != len(word):
-                continue
-            mid, flds = mw.col.db.all('select mid, flds from notes where id = %s' % nid)[0]
-            flds = flds.split('\x1f')
-            model = mw.col.models.get(mid)
-            field_names = [field['name'] for field in model['flds']]
-
-            for field_name in valid_field_names:
-                if field_name in field_names:
-                    yield flds[field_names.index(field_name)]
-                    break
-
-    def select_cloze_words_dialog(self, words, hz, py, transl):
+    def select_words_dialog(self, words, hz, py, transl, for_cloze):
         dialog = QDialog()
         dialog.layout = QVBoxLayout(self)
 
@@ -574,18 +621,23 @@ class RememberberryWidget(ConfigWidget):
             cancelled = False
             dialog.close()
 
-        add_individual_button = QPushButton("Add Separate Clozes")
-        dialog.layout.addWidget(add_individual_button, 2)
-        add_individual_button.clicked.connect(partial(_add, False))
+        if for_cloze:
+            add_individual_button = QPushButton("Add Separate Clozes")
+            dialog.layout.addWidget(add_individual_button, 2)
+            add_individual_button.clicked.connect(partial(_add, False))
 
-        add_individual_button = QPushButton("Add Joint Cloze")
-        dialog.layout.addWidget(add_individual_button, 3)
-        add_individual_button.clicked.connect(partial(_add, True))
+            add_individual_button = QPushButton("Add Joint Cloze")
+            dialog.layout.addWidget(add_individual_button, 3)
+            add_individual_button.clicked.connect(partial(_add, True))
+        else:
+            add_button = QPushButton("Add")
+            dialog.layout.addWidget(add_button, 2)
+            add_button.clicked.connect(partial(_add, False))
 
         cancel_button = QPushButton("Cancel")
         dialog.layout.addWidget(cancel_button, 4)
         cancel_button.clicked.connect(lambda: dialog.close())
-        dialog.setWindowTitle("Cloze Words")
+        dialog.setWindowTitle("Cloze Words" if for_cloze else "Words")
         dialog.setWindowModality(Qt.ApplicationModal)
         dialog.setLayout(dialog.layout)
         dialog.exec_()
@@ -613,7 +665,7 @@ class RememberberryWidget(ConfigWidget):
 
             # Sort by start index
             words = sorted(words, key=lambda w: w[1][0])
-            selected_words, joint = self.select_cloze_words_dialog(
+            selected_words, joint = self.select_words_dialog(
                     words, sentence_hz, sentence_py, sentence_transl)
             if selected_words is None:
                 continue
@@ -686,10 +738,6 @@ class RememberberryWidget(ConfigWidget):
         for i, ((item_hash, *item_content), words) in enumerate(self.search_results):
             colors = []
             sentence_hz, sentence_py, sentence_transl = item_content
-            #debug = sentence_transl == 'I know how to do it.'
-            #if debug:
-                #showInfo(sentence_hz)
-                #showInfo(str(words))
             word_ranges = []
             for word_hash, (start, end), max_correct, hsk_lvl, *_ in words:
                 word_ranges.append((start, end))
