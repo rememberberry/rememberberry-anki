@@ -128,3 +128,17 @@ constituents. Have a few choices:
    for them (minimum of all constituent max_correct)
    Use jieba on cedict to find all compounds
    Then use jieba without the search function on the sentences
+
+----------
+2018-10-17
+----------
+* Fix word/sentence marks
+* Keep manually reordering cedict based on frequency?
+  * Or find a better way of doing this
+Later, add "generated_translation" column items, or "generated_columns"
+* Remove the whole decks tab? use all notes in all decks which match hanzi.
+* Remove "known decks" and replace with hsk level dropdown
+* Add an sentence import function with "import deck", "paste"
+    Actually, we don't need it, since any added cards will have note links to cedict
+    words added. Should I add sentence
+

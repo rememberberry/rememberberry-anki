@@ -92,8 +92,15 @@ class RememberberryDatabase:
         self._load_hsk_cedict()
 
     @property
-    def exists(self):
-        return os.path.exists(self.db_filename)
+    @attach_detach
+    def initiated(self):
+        if not os.path.exists(self.db_filename):
+            return False
+        c = self._get_cursor()
+        res = c.execute('''
+            SELECT name FROM rb.sqlite_master WHERE type='table' AND name='items'
+        ''').fetchall()
+        return len(res) > 0
 
     def _load_hsk_cedict(self):
         # Load HSK files and cedict
@@ -267,6 +274,7 @@ class RememberberryDatabase:
             CREATE TABLE rb.note_links (
                 hash CHARACTER(16),
                 nid INTEGER,
+                add_date DATETIME,
                 PRIMARY KEY (hash, nid),
                 FOREIGN KEY(hash) REFERENCES items(hash)
             )
@@ -366,7 +374,7 @@ class RememberberryDatabase:
                 note_links.append((cedict_hash, nid))
 
         c.executemany('''
-            INSERT OR IGNORE INTO rb.note_links VALUES (?, ?)
+            INSERT OR IGNORE INTO rb.note_links VALUES (?, ?, date('now'))
         ''', note_links)
 
         # 2. Update sum_reps and sum_lapses in rb.items
@@ -491,5 +499,20 @@ class RememberberryDatabase:
     def add_note_link(self, item_hash, nid):
         c = self._get_cursor()
         c.execute('''
-            INSERT OR IGNORE INTO rb.note_links VALUES (?, ?)
+            INSERT OR IGNORE INTO rb.note_links VALUES (?, ?, date('now'))
         ''', (item_hash, nid))
+
+    @attach_detach
+    def get_note_links(self, limit=-1):
+        c = self._get_cursor()
+        limit_clause = ''
+        if limit >= 0:
+            limit_clause = 'LIMIT %i' % limit
+
+        return c.execute('''
+            SELECT * FROM rb.note_links
+            JOIN rb.items ON rb.note_links.hash=rb.items.hash
+            ORDER BY add_date
+            %s
+        ''' % limit_clause).fetchall()
+

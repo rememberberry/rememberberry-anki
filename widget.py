@@ -1,5 +1,6 @@
 import os
 import json
+import base64
 import random
 from functools import partial
 from aqt import mw
@@ -18,9 +19,7 @@ from .db import RememberberryDatabase
 def addChineseModel():
     model_name = "Rememberberry Chinese"
     if mw.col.models.byName(model_name) != None:
-        #showInfo('Already have model')
         return
-    #showInfo('Adding model')
     mm = mw.col.models
     m = mm.new(_(model_name))
     fm = mm.newField(_("Hanzi"))
@@ -172,7 +171,10 @@ class RememberberryWidget(ConfigWidget):
         self.editor = editor
         self.redo_search = True
         file_dir = os.path.dirname(__file__)
-        self.db = RememberberryDatabase(os.path.join(file_dir, 'user_files/db.sqlite'))
+
+        db_name = str(base64.urlsafe_b64encode(bytes(mw.pm.name, 'utf-8')), 'utf-8')
+        db_path = 'user_files/%s.sqlite' % db_name
+        self.db = RememberberryDatabase(os.path.join(file_dir, db_path))
 
         # Try to add the chinese models if they don't exist
         addChineseModel()
@@ -233,6 +235,12 @@ class RememberberryWidget(ConfigWidget):
         return dids[0]
 
     def update_mark_items(self, mark_type):
+        if not self.db.initiated:
+            return
+        results = self.db.get_note_links(10)
+        #showInfo(str(results))
+
+
         nids = [c[0] for c in mw.col.db.all('select nid from cards where data="%s"' % mark_type)]
         nids = set(nids)
         ids_str = ', '.join(str(nid) for nid in nids)
@@ -433,7 +441,7 @@ class RememberberryWidget(ConfigWidget):
                     words, sentence_hz, sentence_py, sentence_transl, False)
 
             for i, (h, (start, end), max_correct, hsk_lvl, py, tr) in enumerate(words):
-                if i not in selected_words:
+                if selected_words is None or i not in selected_words:
                     continue
                 tr = json.loads(tr)[0]
                 py = json.loads(py)[0]
@@ -602,6 +610,7 @@ class RememberberryWidget(ConfigWidget):
         items = []
         word_indices = []
         for i, (h, (start, end), max_correct, hsk_lvl, py, _) in enumerate(words):
+            py = json.loads(py)[0]
             item = QStandardItem('%s (%s)' % (hz[start:end], py))
             is_known = max_correct > 8 or hsk_lvl <= self.db.completed_hsk_lvl
             item.setCheckState(Qt.Checked if not is_known else Qt.Unchecked)
@@ -773,7 +782,7 @@ class RememberberryWidget(ConfigWidget):
         user_decks = self.config['active_vocabulary_decks']
         sentence_decks = self.config['sentence_decks']
 
-        if self.db.exists:
+        if self.db.initiated:
             self.db.update(user_decks)
         else:
             self.db.init(user_decks, sentence_decks)
